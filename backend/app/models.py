@@ -156,6 +156,7 @@ class StressTestStatusOut(BaseModel):
     live_upload_mbps: float = 0.0
     result: StressTestResultOut | None = None
     error: str | None = None
+    diagnostics: list[str] = []
 
 
 class ChaosState(BaseModel):

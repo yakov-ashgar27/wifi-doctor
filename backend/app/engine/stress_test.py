@@ -158,7 +158,10 @@ def http_transfer(
             if stop.is_set():
                 return
             failures_in_a_row += 1
-            counters.error(f"{direction} {url}: {exc.__class__.__name__}")
+            reason = getattr(exc, "reason", None) or getattr(exc, "code", None) or exc
+            msg = f"{direction} {url.split('?')[0]}: {exc.__class__.__name__}: {reason}"[:240]
+            counters.error(msg)
+            log.warning("stress transfer failed: %s", msg)
             if failures_in_a_row >= len(urls) * 2:
                 return  # every endpoint is unreachable; give up quietly
             stop.wait(0.2)
@@ -297,6 +300,7 @@ class StressTestRunner:
         self.error: str | None = None
         self.finished_at: float | None = None
         self._run: _RunState | None = None
+        self.diagnostics: list[str] = []
         self._task: asyncio.Task | None = None
         self._lock = asyncio.Lock()
 
@@ -317,6 +321,7 @@ class StressTestRunner:
             "live_upload_mbps": round(self.live_upload_mbps, 1),
             "result": self.result.to_dict() if self.result else None,
             "error": self.error,
+            "diagnostics": list(self.diagnostics),
         }
 
     async def start(self, chaos_active: bool = False) -> dict[str, Any]:
@@ -328,6 +333,7 @@ class StressTestRunner:
             unloaded = [self._sample(f) for f in self._frames()[-5:]]
             self._run = _RunState(uuid.uuid4().hex[:8], time.time(), time.monotonic(), unloaded)
             self.state, self.progress, self.result, self.error, self.finished_at = "running", 0.0, None, None, None
+            self.diagnostics = []
             self.live_download_mbps = self.live_upload_mbps = 0.0
             self._task = asyncio.create_task(self._execute(), name="bufferbloat-test")
         await self._emit()
@@ -406,6 +412,7 @@ class StressTestRunner:
             self.error = f"{exc.__class__.__name__}: {exc}"
         finally:
             stop.set()
+            self.diagnostics = list(dict.fromkeys(counters.errors))[:5]
             self.progress = 1.0 if self.state == "completed" else self.progress
             self.live_download_mbps = self.live_upload_mbps = 0.0
             self.finished_at = time.time()

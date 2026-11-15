@@ -184,6 +184,7 @@ export interface StressTestStatus {
   live_upload_mbps: number;
   result: StressTestResult | null;
   error: string | null;
+  diagnostics?: string[];
 }
 
 export type IncidentEvent = 'opened' | 'updated' | 'closed';

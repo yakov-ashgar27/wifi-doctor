@@ -146,9 +146,20 @@ export default function StressTestPanel({ status, chaosMode, connected }: Props)
               )}
             </>
           ) : (
-            <p className="pr-4 text-xs text-rose-300">
-              Test {status.state}: {status.error}
-            </p>
+            <div className="pr-4 text-xs text-rose-300">
+              <p>
+                Test {status.state}: {status.error}
+              </p>
+              {status.diagnostics && status.diagnostics.length > 0 && (
+                <ul className="num mt-2 space-y-0.5 text-[10px] text-slate-500">
+                  {status.diagnostics.slice(0, 3).map((d) => (
+                    <li key={d} className="break-all">
+                      {d}
+                    </li>
+                  ))}
+                </ul>
+              )}
+            </div>
           )}
         </div>
       )}
