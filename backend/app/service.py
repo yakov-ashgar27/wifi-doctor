@@ -48,6 +48,7 @@ class TelemetryService:
         self._last_top_refresh = 0.0
         self._last_wifi_refresh = -1e9
         self._quiet_until = 0.0  # suppress self-inflicted incidents around a stress test
+        self._stress_active = False
 
     # ------------------------------------------------------------ lifecycle
     async def start(self) -> None:
@@ -137,6 +138,12 @@ class TelemetryService:
         if self.stress.running:
             # Latency stays inflated for a moment after the load stops (queues drain).
             self._quiet_until = time.monotonic() + 2 * self.settings.probe_interval_s
+            self._stress_active = True
+        elif self._stress_active:
+            # Test just ended: the 30 s loss window still holds probes that timed out
+            # under our own load. Start the rolling windows clean (baselines are kept).
+            self._stress_active = False
+            self.analyzer.reset()
         self_loaded = self.stress.running or time.monotonic() < self._quiet_until
         frame = self.analyzer.ingest(
             probes, bandwidth, self.prober.network, self.simulator.mode.value, wifi, learn_baseline=not self_loaded
