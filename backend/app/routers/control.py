@@ -31,6 +31,10 @@ async def set_chaos(mode: str, request: Request) -> ChaosState:
     service = _service(request)
     if mode != "none" and service.stress.running:
         raise HTTPException(status_code=409, detail="A bufferbloat stress test is running; wait for it to finish.")
+    if service.simulator.mode.value != mode:
+        # Rolling windows still hold the previous scenario's synthetic samples;
+        # start clean so each verdict reflects only the current mode (baselines are kept).
+        service.analyzer.reset()
     service.simulator.set_mode(mode)
     await service.broadcast({"type": "chaos", "mode": mode, "since": service.simulator.since})
     return ChaosState(mode=mode, since=service.simulator.since, available=MODES)

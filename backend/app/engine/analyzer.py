@@ -73,6 +73,7 @@ class HopStats:
     last_ok: bool
     status: str
     simulated: bool = False
+    recent_lost: int = 0
     # Adaptive baseline (robust z-score). Optional / backward compatible.
     baseline_median_ms: float | None = None
     baseline_sigma_ms: float | None = None
@@ -175,6 +176,7 @@ class HopWindow:
                 sum(1 for s in recent_window if s is None) / len(recent_window) * 100.0
                 if recent_window else 0.0
             ),
+            "recent_lost": sum(1 for s in recent_window if s is None),
             "samples": n,
             "last_ok": bool(data) and data[-1] is not None,
         }
@@ -273,9 +275,10 @@ class Analyzer:
             return UNKNOWN
         warn, crit = self._hop_thresholds(hop)
         rtt, loss = m["recent_ms"], m["recent_loss_pct"]
-        if loss >= self.s.loss_crit_pct or rtt is None or rtt > crit:
+        lossy = m["recent_lost"] >= self.s.min_lost_probes
+        if (lossy and loss >= self.s.loss_crit_pct) or rtt is None or rtt > crit:
             return CRITICAL
-        if loss > self.s.loss_warn_pct or rtt > warn or anomaly:
+        if (lossy and loss > self.s.loss_warn_pct) or rtt > warn or anomaly:
             return WARNING
         return HEALTHY
 
@@ -332,6 +335,7 @@ class Analyzer:
                 loss_pct=round(m["loss_pct"], 1),
                 recent_ms=_r(m["recent_ms"]),
                 recent_loss_pct=round(m["recent_loss_pct"], 1),
+                recent_lost=m["recent_lost"],
                 samples=m["samples"],
                 last_ok=m["last_ok"],
                 status=self._hop_status(hop, m, sample.target is not None, anomaly),
@@ -363,7 +367,12 @@ class Analyzer:
             return h.recent_ms if h.recent_ms is not None else math.inf
 
         gw_rtt, wan_rtt, dns_rtt = rtt(gw), rtt(wan), rtt(dns)
-        gw_loss, wan_loss, dns_loss = gw.recent_loss_pct, wan.recent_loss_pct, dns.recent_loss_pct
+
+        def eff_loss(h: HopStats) -> float:
+            # A single dropped probe is noise, not packet loss worth a verdict.
+            return h.recent_loss_pct if h.recent_lost >= s.min_lost_probes else 0.0
+
+        gw_loss, wan_loss, dns_loss = eff_loss(gw), eff_loss(wan), eff_loss(dns)
         util = bw.utilization_pct
         traffic = bw.total_mbps
         top = (bw.top_process or {}).get("name")

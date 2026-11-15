@@ -79,6 +79,9 @@ class Settings:
     recent_rtt_samples: int = 8        # median of the last N successful RTTs
     recent_loss_samples: int = 20      # loss % over the last N probes (30 s)
     min_samples_for_verdict: int = 4
+    # A loss trigger needs at least this many lost probes in the recent window:
+    # one dropped ping out of 20 is 5 % and must not, by itself, raise an alarm.
+    min_lost_probes: int = 2
     history_frames: int = 80           # frames replayed to newly connected clients
 
     # ------------------------------------------------------- RCA thresholds

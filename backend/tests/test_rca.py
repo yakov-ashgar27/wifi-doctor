@@ -115,3 +115,30 @@ def test_chaos_modes_are_diagnosed(mode, layer):
     assert frame.diagnosis.root_cause_layer == layer
     assert frame.diagnosis.status in ("WARNING", "CRITICAL")
     assert frame.diagnosis.confidence_score >= 70
+
+
+def test_single_dropped_probe_is_not_packet_loss():
+    """Found on a real weak Wi-Fi link: 1 lost ping in 20 = 5 % used to raise LOCAL_WIFI."""
+    frame = run(25, lambda r, i: probes(r.uniform(2, 6), r.uniform(9, 14), 12) if i != 22 else probes(None, 12, 12))
+    assert frame.hops["gateway"].recent_lost == 1
+    assert frame.hops["gateway"].status == "HEALTHY"
+    assert frame.diagnosis.status == "HEALTHY"
+    two = run(25, lambda r, i: probes(None if i in (20, 23) else r.uniform(2, 6), 12, 12))
+    assert two.diagnosis.root_cause_layer == "LOCAL_WIFI"
+
+
+def test_chaos_mode_switch_does_not_carry_over():
+    """wifi_lag -> isp_loss back to back must be diagnosed as ISP, not leftover Wi-Fi loss."""
+    analyzer = Analyzer(settings)
+    rng = random.Random(1)
+    chaos = ChaosSimulator(seed=9)
+    for mode in ("wifi_lag", "isp_loss", "dns_slowdown", "bufferbloat"):
+        analyzer.reset()                     # what POST /api/chaos/{mode} now does
+        chaos.set_mode(mode)
+        frame = None
+        for i in range(9):                   # ~13 s, the time a demo user waits
+            p, b = chaos.apply(healthy(rng, i), bw())
+            frame = analyzer.ingest(p, b, NET, mode)
+        expected = {"wifi_lag": "LOCAL_WIFI", "isp_loss": "ISP_WAN", "dns_slowdown": "DNS_SERVER",
+                    "bufferbloat": "BUFFERBLOAT"}[mode]
+        assert frame.diagnosis.root_cause_layer == expected, mode
