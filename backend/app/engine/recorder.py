@@ -58,8 +58,14 @@ class IncidentRecorder:
             await session.commit()
 
     # ------------------------------------------------------------------ api
-    async def process(self, frame: TelemetryFrame) -> dict[str, Any] | None:
-        """Returns a broadcastable event dict when an incident opens/escalates/closes."""
+    async def process(self, frame: TelemetryFrame, suppress: bool = False) -> dict[str, Any] | None:
+        """Returns a broadcastable event dict when an incident opens/escalates/closes.
+
+        ``suppress`` is set while WiFi-Doctor itself is loading the link (bufferbloat
+        test): that degradation is self-inflicted and must not reach the ISP report.
+        """
+        if suppress:
+            return None
         d = frame.diagnosis
         try:
             if d.status == HEALTHY:

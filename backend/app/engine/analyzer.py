@@ -287,6 +287,7 @@ class Analyzer:
         network: NetworkInfo,
         chaos_mode: str = "none",
         wifi: WifiInfo | None = None,
+        learn_baseline: bool = True,
     ) -> TelemetryFrame:
         self.tick += 1
         # A different gateway/resolver is a different network: start a new baseline.
@@ -314,7 +315,8 @@ class Analyzer:
                 and m["recent_ms"] > self._anomaly_floor(hop)
             )
             # Simulated (chaos) samples never pollute the learned baseline.
-            if sample.target is not None and not sample.simulated:
+            # Self-induced load (the bufferbloat test) is not "normal" either.
+            if learn_baseline and sample.target is not None and not sample.simulated:
                 baseline.observe(sample.rtt_ms, anomalous=anomaly)
             hops[hop] = HopStats(
                 hop=hop,

@@ -562,3 +562,27 @@ def test_api_returns_409_while_chaos_active():
     with TestClient(app) as client:
         r = client.post("/api/stress-test/start")
         assert r.status_code == 409 and "chaos" in r.json()["detail"].lower()
+
+
+def test_self_induced_load_is_not_learned_as_baseline():
+    a = Analyzer(settings)
+    _feed(a, 70, _stable)
+    before = a.baselines[HOP_WAN].stats()[0]
+    for i in range(30):
+        a.ingest(probes(110, 115, 9), bw(50, 3), NET, learn_baseline=False)
+    assert a.baselines[HOP_WAN].stats()[0] == pytest.approx(before)
+
+
+def test_recorder_suppresses_incidents_during_stress_test():
+    pytest.importorskip("sqlalchemy")
+    from app.engine.recorder import IncidentRecorder
+
+    class NoDB:
+        def __call__(self):  # any DB access would raise
+            raise AssertionError("database must not be touched while suppressed")
+
+    rec = IncidentRecorder(NoDB(), settings)
+    frame = _feed(Analyzer(settings), 20, lambda r, i: probes(r.uniform(60, 90), 100, 40))
+    assert frame.diagnosis.status != "HEALTHY"
+    assert asyncio.run(rec.process(frame, suppress=True)) is None
+    assert rec.open_id is None

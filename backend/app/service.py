@@ -47,6 +47,7 @@ class TelemetryService:
         self._wifi_task: asyncio.Task | None = None
         self._last_top_refresh = 0.0
         self._last_wifi_refresh = -1e9
+        self._quiet_until = 0.0  # suppress self-inflicted incidents around a stress test
 
     # ------------------------------------------------------------ lifecycle
     async def start(self) -> None:
@@ -133,14 +134,20 @@ class TelemetryService:
 
         probes, bandwidth = self.simulator.apply(probes, bandwidth)
         wifi = self.simulator.apply_wifi(self.monitor.wifi)
-        frame = self.analyzer.ingest(probes, bandwidth, self.prober.network, self.simulator.mode.value, wifi)
+        if self.stress.running:
+            # Latency stays inflated for a moment after the load stops (queues drain).
+            self._quiet_until = time.monotonic() + 2 * self.settings.probe_interval_s
+        self_loaded = self.stress.running or time.monotonic() < self._quiet_until
+        frame = self.analyzer.ingest(
+            probes, bandwidth, self.prober.network, self.simulator.mode.value, wifi, learn_baseline=not self_loaded
+        )
         payload = frame.to_dict()
         self.latest = payload
         self.history.append(payload)
         self.stress.on_frame(payload)
 
         await self.broadcast({"type": "telemetry", "frame": payload})
-        event = await self.recorder.process(frame)
+        event = await self.recorder.process(frame, suppress=self_loaded)
         if event:
             await self.broadcast({"type": "incident", **event})
         return payload
