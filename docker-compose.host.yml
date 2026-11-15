@@ -1,0 +1,16 @@
+# Linux-only override: run the backend on the host network stack so the prober
+# sees your real Wi-Fi interface, default gateway and DNS resolver.
+#
+#   docker compose -f docker-compose.yml -f docker-compose.host.yml up --build
+
+services:
+  backend:
+    network_mode: host
+    ports: !reset []
+    cap_add:
+      - NET_RAW
+      - NET_ADMIN
+
+  frontend:
+    extra_hosts:
+      - "backend:host-gateway"   # nginx upstream "backend:8000" -> the host

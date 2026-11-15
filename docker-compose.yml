@@ -1,0 +1,40 @@
+# One-command startup:   docker compose up --build
+# Dashboard:             http://localhost:3000
+# API docs:              http://localhost:8000/docs
+#
+# Default = bridge networking (works on Linux, macOS and Windows Docker Desktop).
+# In bridge mode "Hop 1" is the Docker bridge gateway, not your Wi-Fi router.
+# For true Wi-Fi diagnostics on Linux, add the host-network override:
+#   docker compose -f docker-compose.yml -f docker-compose.host.yml up --build
+
+services:
+  backend:
+    build: ./backend
+    container_name: wifi-doctor-backend
+    restart: unless-stopped
+    cap_add:
+      - NET_RAW      # enables the high-fidelity scapy / raw ICMP probe backend
+    environment:
+      - DATABASE_URL=sqlite+aiosqlite:////data/wifi_doctor.db
+      - CORS_ORIGINS=http://localhost:3000,http://127.0.0.1:3000,http://localhost:5173
+      # Optional overrides:
+      # - GATEWAY_IP=192.168.1.1
+      # - DNS_SERVER=192.168.1.1
+      # - PROBE_BACKEND=subprocess
+    volumes:
+      - wifi-doctor-data:/data
+    ports:
+      - "8000:8000"
+
+  frontend:
+    build: ./frontend
+    container_name: wifi-doctor-frontend
+    restart: unless-stopped
+    depends_on:
+      backend:
+        condition: service_healthy
+    ports:
+      - "3000:80"
+
+volumes:
+  wifi-doctor-data:

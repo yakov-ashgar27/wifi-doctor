@@ -1,0 +1,281 @@
+<div align="center">
+
+# 🩺 WiFi-Doctor
+
+**Real-time network health monitoring with automated Root Cause Analysis.**
+
+It finds the layer where your network is failing and tells you how to fix it.
+
+![Python](https://img.shields.io/badge/Python-3.13-3776AB?logo=python&logoColor=white)
+![FastAPI](https://img.shields.io/badge/FastAPI-WebSockets-009688?logo=fastapi&logoColor=white)
+![React](https://img.shields.io/badge/React-18-61DAFB?logo=react&logoColor=black)
+![TypeScript](https://img.shields.io/badge/TypeScript-strict-3178C6?logo=typescript&logoColor=white)
+![Tailwind](https://img.shields.io/badge/Tailwind-CSS-06B6D4?logo=tailwindcss&logoColor=white)
+![Docker](https://img.shields.io/badge/Docker-Compose-2496ED?logo=docker&logoColor=white)
+![License](https://img.shields.io/badge/license-MIT-green)
+
+</div>
+
+---
+
+## Why WiFi-Doctor?
+
+"The Internet is slow" can mean four very different things: a weak Wi-Fi signal, a saturated uplink, a congested ISP, or a slow DNS resolver. Each one has a different fix and a different person to call.
+
+Packet sniffers such as Wireshark show you everything and conclude nothing. WiFi-Doctor works the other way around:
+
+| | Passive sniffers | **WiFi-Doctor** |
+|---|---|---|
+| Data collection | Captures existing traffic | **Actively probes** each layer of the path every 1.5 s |
+| Output | Raw packet tables | **Plain-English diagnosis** + confidence score + fix |
+| Correlation | Manual | Latency/jitter/loss **correlated with local bandwidth** automatically |
+| Evidence | pcap files | **Timestamped incident log + CSV report** you can send to your ISP |
+| Setup | Drivers, admin rights, expertise | Runs unprivileged and **never crashes** when it lacks permissions |
+
+### Key features
+
+- **Multi-layer active probing**: Gateway (Wi-Fi/LAN) → ISP/WAN (`1.1.1.1`, `8.8.8.8` backup) → DNS (real UDP/53 A-record queries).
+- **Deterministic RCA engine** with five verdicts (`LOCAL_WIFI`, `BUFFERBLOAT`, `ISP_WAN`, `DNS_SERVER`, `HEALTHY`), each with a confidence score and remediation steps.
+- **Rolling-window telemetry math** with NumPy: current, average and P95 RTT, jitter, and packet loss per hop.
+- **Bandwidth and process correlation** through `psutil`: live Mbps, observed peak, utilisation %, and the top network-consuming process.
+- **Graceful probe degradation**: `scapy` raw ICMP → unprivileged ICMP sockets → OS `ping` → TCP handshake RTT.
+- **Chaos Engineering mode** that injects realistic faults, so you can watch a full diagnosis even on a healthy network.
+- **Incident log in SQLite** with a 30 s anti-spam cooldown, worst-case metric tracking and a one-click **ISP Evidence Report (CSV)**.
+- **NOC-style React dashboard** with a live hop topology, synchronised charts, and a resilient WebSocket client (backoff, jitter, watchdog).
+
+---
+
+## Architecture
+
+```mermaid
+flowchart LR
+    subgraph Host["Your machine"]
+        direction LR
+        subgraph Engine["Backend · FastAPI + asyncio (tick = 1.5 s)"]
+            P["Prober<br/>Gateway · WAN · DNS<br/>scapy → icmp → ping → tcp"]
+            M["SystemMonitor<br/>psutil Mbps · peak · top process"]
+            C{{"ChaosSimulator<br/>fault injection"}}
+            A["Analyzer<br/>deque(60) · P95 · jitter · loss<br/>RCA decision tree"]
+            R["IncidentRecorder<br/>open / escalate / close<br/>30 s cooldown"]
+            WS(["WebSocket /ws<br/>broadcast loop"])
+            API(["REST /api<br/>incidents · CSV · chaos"])
+        end
+        DB[("SQLite<br/>incident_logs")]
+        UI["React + TypeScript dashboard<br/>Verdict · Topology · Charts · Chaos · Incidents"]
+    end
+
+    NET(("Gateway<br/>1.1.1.1 / 8.8.8.8<br/>DNS resolver"))
+
+    P -- ICMP / UDP53 / TCP --> NET
+    P --> C
+    M --> C
+    C --> A
+    A -- TelemetryFrame --> WS
+    A -- Diagnosis --> R
+    R --> DB
+    R -- incident events --> WS
+    DB --> API
+    WS -- live frames --> UI
+    UI -- POST /api/chaos/mode --> API
+    API --> C
+    UI -- GET /api/incidents/export --> API
+```
+
+**Per-tick pipeline (every 1.5 s):**
+
+1. The `Prober` runs three probes concurrently (`asyncio.gather`), each bounded by a 1 s timeout.
+2. The `SystemMonitor` computes Mbps from NIC counter deltas. A worker thread refreshes the top-process scan every 3 s.
+3. The `ChaosSimulator` (when enabled) layers synthetic faults on top of the real samples.
+4. The `Analyzer` updates the 60-sample windows, computes statistics, and runs the RCA decision tree.
+5. The frame is broadcast to every WebSocket client. The `IncidentRecorder` persists state transitions to SQLite.
+
+---
+
+## RCA Decision Matrix
+
+The verdict is based on a short "recent" view: the median of the last 8 good RTTs and the loss over the last 20 probes (30 s). This lets it react within seconds without flapping on a single outlier. The dashboard still shows full 60-sample (90 s) statistics. Rules are evaluated top to bottom, and the first match wins.
+
+| # | Layer | Trigger (thresholds) | Diagnosis | Recommended remediation |
+|---|---|---|---|---|
+| 0 | `LOCAL_WIFI` (CRITICAL) | 100 % WAN loss **and** gateway unreachable | Network link down | Check Wi-Fi association / cable, power-cycle router & modem |
+| 1 | `BUFFERBLOAT` | (Gateway RTT **> 40 ms** OR WAN RTT **> 100 ms**) **AND** link utilisation **> 70 %** of observed peak | Local bandwidth saturation (bufferbloat) | Pause/limit the bulk transfer (top process is named), enable **SQM (fq_codel / CAKE)** at ~90 % of plan speed, QoS |
+| 2 | `LOCAL_WIFI` | Gateway RTT **> 35 ms** OR gateway loss **> 3 %**, while local traffic **< 15 Mbps** | Wi-Fi signal degradation or router congestion | Move closer, switch to 5/6 GHz, change channel, reboot router, confirm with Ethernet |
+| 3 | `ISP_WAN` | Gateway healthy (**< 15 ms, 0 % loss**) BUT WAN RTT **> 120 ms** OR WAN loss **> 3 %** | ISP backbone congestion or upstream routing issue | Power-cycle modem/ONT, check ISP status page, **export ISP Evidence Report** and open a ticket |
+| 4 | `DNS_SERVER` | Gateway & WAN healthy BUT DNS resolution **> 150 ms** OR failing (> 3 % timeouts) | Slow / unresponsive DNS resolver | Switch to `1.1.1.1` / `8.8.8.8` on the device or router DHCP |
+| 5 | `NONE` | All layers within thresholds | All network layers healthy | No action needed |
+
+**Severity:** `CRITICAL` when loss is ≥ 10 % or latency exceeds the critical threshold for that hop (Gateway 100 ms · WAN 300 ms · DNS 500 ms). Otherwise `WARNING`.
+
+**Confidence score (0–99):** combines *how far* the metrics exceed their thresholds, *how cleanly* the other layers isolate the fault (for example, a clean gateway raises confidence in an ISP verdict), and *how many samples* support it. Weaker fallback branches (such as a degraded gateway under moderate load) are scored lower on purpose.
+
+**Edge cases handled:**
+
+- A gateway that never answers ICMP while the Internet works is treated as *filtering probes*, not as a fault.
+- Peak bandwidth has a 10 Mbps floor, so an idle machine never looks "saturated".
+- If ICMP is silently filtered on the network but UDP/DNS works, the prober switches itself to TCP-handshake RTT.
+
+Every threshold lives in [`backend/app/config.py`](backend/app/config.py), and each one can be overridden with an environment variable (for example `GATEWAY_WARN_MS=50`).
+
+---
+
+## Quickstart
+
+### Option A: Docker Compose (one command)
+
+```bash
+git clone https://github.com/yakov-ashgar27/wifi-doctor.git
+cd wifi-doctor
+docker compose up --build
+```
+
+- Dashboard: **http://localhost:3000**
+- API docs (Swagger): **http://localhost:8000/docs**
+
+> **Networking note:** with the default bridge network, *Hop 1* measures the Docker bridge gateway rather than your Wi-Fi router. On **Linux**, use the host-network override to diagnose your real Wi-Fi:
+>
+> ```bash
+> docker compose -f docker-compose.yml -f docker-compose.host.yml up --build
+> ```
+>
+> On Docker Desktop (macOS/Windows), run the backend locally (Option B) for true Wi-Fi diagnostics, or set `GATEWAY_IP=<your router>` in `docker-compose.yml`.
+
+### Option B: Local execution
+
+**Requirements:** Python **3.13** and Node.js **20+**.
+
+**Linux / macOS**
+
+```bash
+./scripts/run_local.sh            # unprivileged: icmp_dgram / ping fallback
+sudo ./scripts/run_local.sh       # optional: enables scapy raw-socket ICMP
+```
+
+**Windows (PowerShell)**
+
+```powershell
+powershell -ExecutionPolicy Bypass -File .\scripts\run_local.ps1
+# or double-click scripts\run_local.bat
+```
+
+> On Windows, scapy needs [Npcap](https://npcap.com/) and an Administrator shell. Without them, WiFi-Doctor automatically uses `ping.exe` and keeps measuring real latency.
+
+**Manual setup**
+
+```bash
+# Terminal 1: backend
+cd backend
+python -m venv .venv && source .venv/bin/activate   # Windows: .venv\Scripts\activate
+pip install -r requirements.txt
+uvicorn app.main:app --host 127.0.0.1 --port 8000
+
+# Terminal 2: frontend
+cd frontend
+npm install
+npm run dev          # http://localhost:5173 (proxies /api and /ws to :8000)
+```
+
+### Try the RCA engine in 10 seconds
+
+1. Open the dashboard and wait for the verdict to read **All network layers healthy**.
+2. Click **Simulate ISP Loss**. Within a few ticks the WAN node turns red, the latency chart spikes, and the verdict becomes **ISP backbone congestion** with high confidence.
+3. Click **Normal**. The incident closes in the history table with its duration and worst-case metrics.
+4. Click **Download ISP Evidence Report (CSV)**.
+
+Simulated incidents are flagged (🧪 in the UI, `simulated=yes` in the CSV). Tick **Real incidents only** to keep them out of the report you send to your ISP.
+
+---
+
+## API reference
+
+| Method | Endpoint | Description |
+|---|---|---|
+| `WS` | `/ws` | Live stream: `snapshot` (last 80 frames on connect), `telemetry` (every tick), `incident` (opened/updated/closed), `chaos` |
+| `GET` | `/api/status` | Latest frame, network info, uptime, connected clients |
+| `GET` | `/api/incidents?page=1&page_size=10&real_only=false&layer=ISP_WAN` | Paginated incident history |
+| `GET` | `/api/incidents/export?real_only=true` | Streamed CSV evidence report (formula-injection safe, Excel-friendly BOM) |
+| `GET` | `/api/chaos` | Current fault-injection mode |
+| `POST` | `/api/chaos/{mode}` | `none` · `wifi_lag` · `isp_loss` · `dns_slowdown` · `bufferbloat` |
+| `GET` | `/api/health` | Liveness probe |
+
+---
+
+## Probe reliability (fallback chain)
+
+| Priority | Backend | Needs | Used when |
+|---|---|---|---|
+| 1 | `scapy` raw ICMP | root / `CAP_NET_RAW` / Admin + Npcap | Most accurate, using kernel packet timestamps |
+| 2 | `icmp_dgram` | Linux `ping_group_range` or macOS | Unprivileged ICMP sockets, no subprocess cost |
+| 3 | `subprocess` | OS `ping` binary | Stock Windows; RTT parsed by a locale-tolerant regex |
+| 4 | `tcp` | nothing | Locked-down containers. Times the TCP handshake (SYN→SYN/ACK **or RST**) |
+
+Capabilities are detected at startup. If a backend starts failing at runtime (for example, permissions are revoked), the prober **demotes itself** to the next backend instead of crashing. DNS timing never needs privileges because it sends a hand-built DNS packet over a normal UDP socket.
+
+---
+
+## Project structure
+
+```
+wifi-doctor/
+├── backend/
+│   ├── app/
+│   │   ├── main.py              # FastAPI entrypoint, CORS, lifespan, /ws endpoint
+│   │   ├── service.py           # Real-time pipeline + WebSocket broadcast loop
+│   │   ├── config.py            # Thresholds, probe targets, window sizes (env-overridable)
+│   │   ├── database.py          # Async SQLAlchemy + aiosqlite
+│   │   ├── models.py            # IncidentLog ORM + Pydantic schemas
+│   │   ├── engine/
+│   │   │   ├── prober.py        # Multi-layer prober with fallback chain
+│   │   │   ├── system_monitor.py# Mbps, NIC detection, top process
+│   │   │   ├── analyzer.py      # Rolling stats + RCA decision engine
+│   │   │   ├── simulator.py     # Chaos / fault injection
+│   │   │   └── recorder.py      # Incident lifecycle → SQLite
+│   │   └── routers/
+│   │       ├── incidents.py     # History + CSV export
+│   │       └── control.py       # Chaos control + status
+│   ├── tests/test_rca.py        # Deterministic RCA + chaos tests
+│   ├── requirements.txt
+│   └── Dockerfile
+├── frontend/
+│   ├── src/
+│   │   ├── components/          # Header, VerdictBanner, TopologyMap, TelemetryCharts,
+│   │   │                        # ChaosControls, IncidentTable
+│   │   ├── hooks/useTelemetry.ts# Resilient WebSocket hook
+│   │   ├── types/telemetry.ts   # Strict payload types
+│   │   └── lib/                 # API client + formatters
+│   ├── nginx.conf
+│   └── Dockerfile
+├── scripts/                     # run_local.sh · run_local.ps1 · run_local.bat
+├── docker-compose.yml
+└── docker-compose.host.yml      # Linux host-network override
+```
+
+## Testing
+
+```bash
+cd backend
+pip install pytest
+python -m pytest -q
+```
+
+The test suite feeds synthetic probe streams into the analyzer and checks every RCA branch. It also confirms that each chaos mode is diagnosed as the correct layer with ≥ 70 % confidence.
+
+## Configuration
+
+| Variable | Default | Purpose |
+|---|---|---|
+| `PROBE_INTERVAL_S` | `1.5` | Tick interval |
+| `PROBE_TIMEOUT_S` | `1.0` | Per-probe timeout |
+| `WAN_PRIMARY` / `WAN_BACKUP` | `1.1.1.1` / `8.8.8.8` | WAN probe targets |
+| `GATEWAY_IP` / `DNS_SERVER` | auto | Override auto-detection |
+| `PROBE_BACKEND` | auto | Force `scapy`, `icmp_dgram`, `subprocess` or `tcp` |
+| `INCIDENT_COOLDOWN_S` | `30` | Minimum gap between new incidents |
+| `DATABASE_URL` | `sqlite+aiosqlite:///./data/wifi_doctor.db` | Storage |
+| `GATEWAY_WARN_MS`, `WAN_WARN_MS`, `DNS_WARN_MS`, `LOSS_WARN_PCT`, `BLOAT_UTILIZATION_PCT`, … | see `config.py` | RCA thresholds |
+
+## Privacy
+
+WiFi-Doctor is 100 % local. It contacts only your gateway, two public anycast resolvers (`1.1.1.1`, `8.8.8.8`) and your configured DNS server. It has no telemetry, no accounts, and no cloud.
+
+## License
+
+[MIT](LICENSE)
