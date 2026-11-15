@@ -14,6 +14,12 @@ It finds the layer where your network is failing and tells you how to fix it.
 ![Docker](https://img.shields.io/badge/Docker-Compose-2496ED?logo=docker&logoColor=white)
 ![License](https://img.shields.io/badge/license-MIT-green)
 
+<br/>
+
+<img src="docs/dashboard.png" alt="WiFi-Doctor dashboard diagnosing bufferbloat with 95% confidence" width="900"/>
+
+<sub><i>Live dashboard on a home Wi-Fi network: the Bufferbloat simulation saturates the link, latency inflates on every hop, and the RCA engine names local bandwidth saturation as the root cause with 95% confidence.</i></sub>
+
 </div>
 
 ---
