@@ -51,7 +51,7 @@ class Settings:
     cors_origins: list[str] = field(
         default_factory=lambda: _env_list(
             "CORS_ORIGINS",
-            ["http://localhost:5173", "http://127.0.0.1:5173", "http://localhost:3000"],
+            ["http://localhost:5173", "http://127.0.0.1:5173", "http://localhost:3088"],
         )
     )
 

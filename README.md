@@ -194,8 +194,10 @@ cd wifi-doctor
 docker compose up --build
 ```
 
-- Dashboard: **http://localhost:3000**
-- API docs (Swagger): **http://localhost:8000/docs**
+- Dashboard: **http://localhost:3088**
+- API docs (Swagger): **http://localhost:8088/docs**
+
+The Docker setup uses host ports 3088 and 8088, which are uncommon, so it does not collide with other local projects that already use 3000 or 8000.
 
 > **Networking note:** with the default bridge network, *Hop 1* measures the Docker bridge gateway rather than your Wi-Fi router. On **Linux**, use the host-network override to diagnose your real Wi-Fi:
 >
