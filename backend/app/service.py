@@ -23,6 +23,7 @@ from .engine.analyzer import Analyzer
 from .engine.prober import Prober
 from .engine.recorder import IncidentRecorder
 from .engine.simulator import ChaosSimulator
+from .engine.stress_test import StressTestRunner
 from .engine.system_monitor import SystemMonitor
 
 log = logging.getLogger("wifi_doctor.service")
@@ -39,10 +40,13 @@ class TelemetryService:
         self.clients: set[WebSocket] = set()
         self.history: deque[dict[str, Any]] = deque(maxlen=settings.history_frames)
         self.latest: dict[str, Any] | None = None
+        self.stress = StressTestRunner(settings, frames=lambda: list(self.history), broadcast=self.broadcast)
         self.started_at = time.time()
         self._task: asyncio.Task | None = None
         self._top_task: asyncio.Task | None = None
+        self._wifi_task: asyncio.Task | None = None
         self._last_top_refresh = 0.0
+        self._last_wifi_refresh = -1e9
 
     # ------------------------------------------------------------ lifecycle
     async def start(self) -> None:
@@ -53,10 +57,11 @@ class TelemetryService:
         self._task = asyncio.create_task(self._run(), name="telemetry-loop")
 
     async def stop(self) -> None:
-        for task in (self._task, self._top_task):
+        await self.stress.shutdown()
+        for task in (self._task, self._top_task, self._wifi_task):
             if task:
                 task.cancel()
-        for task in (self._task, self._top_task):
+        for task in (self._task, self._top_task, self._wifi_task):
             if task:
                 try:
                     await task
@@ -102,17 +107,37 @@ class TelemetryService:
 
         self._top_task = asyncio.create_task(_refresh())
 
+    def _maybe_refresh_wifi(self) -> None:
+        """PHY stats shell out (netsh / iw / system_profiler): worker thread, every few seconds."""
+        now = time.monotonic()
+        if now - self._last_wifi_refresh < self.settings.wifi_refresh_s:
+            return
+        if self._wifi_task and not self._wifi_task.done():
+            return
+        self._last_wifi_refresh = now
+
+        async def _refresh() -> None:
+            try:
+                await asyncio.to_thread(self.monitor.refresh_wifi)
+            except Exception:
+                log.debug("wifi scan failed", exc_info=True)
+
+        self._wifi_task = asyncio.create_task(_refresh())
+
     async def tick(self) -> dict[str, Any]:
         probes = await self.prober.probe_all()
         self.monitor.set_interface(self.prober.network.interface)
         bandwidth = self.monitor.sample()
         self._maybe_refresh_top_process()
+        self._maybe_refresh_wifi()
 
         probes, bandwidth = self.simulator.apply(probes, bandwidth)
-        frame = self.analyzer.ingest(probes, bandwidth, self.prober.network, self.simulator.mode.value)
+        wifi = self.simulator.apply_wifi(self.monitor.wifi)
+        frame = self.analyzer.ingest(probes, bandwidth, self.prober.network, self.simulator.mode.value, wifi)
         payload = frame.to_dict()
         self.latest = payload
         self.history.append(payload)
+        self.stress.on_frame(payload)
 
         await self.broadcast({"type": "telemetry", "frame": payload})
         event = await self.recorder.process(frame)
@@ -124,7 +149,9 @@ class TelemetryService:
     async def register(self, ws: WebSocket) -> None:
         await ws.accept()
         self.clients.add(ws)
-        await ws.send_text(json.dumps({"type": "snapshot", "frames": list(self.history)}))
+        await ws.send_text(
+            json.dumps({"type": "snapshot", "frames": list(self.history), "stress_test": self.stress.status()})
+        )
 
     def unregister(self, ws: WebSocket) -> None:
         self.clients.discard(ws)

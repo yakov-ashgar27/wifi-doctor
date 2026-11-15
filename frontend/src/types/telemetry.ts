@@ -25,6 +25,12 @@ export interface HopStats {
   last_ok: boolean;
   status: HopStatus;
   simulated: boolean;
+  /* Adaptive baseline (robust MAD z-score). Optional for backward compatibility. */
+  baseline_median_ms?: number | null;
+  baseline_sigma_ms?: number | null;
+  baseline_samples?: number;
+  z_score?: number | null;
+  anomaly?: boolean;
 }
 
 export interface TopProcess {
@@ -44,6 +50,28 @@ export interface BandwidthStats {
   link_speed_mbps: number | null;
   is_wireless: boolean | null;
   top_process: TopProcess | null;
+  simulated: boolean;
+}
+
+export type WifiBand = '2.4 GHz' | '5 GHz' | '6 GHz';
+export type SignalQuality = 'good' | 'fair' | 'weak';
+
+export interface WifiInfo {
+  is_wireless: boolean;
+  interface: string | null;
+  ssid: string | null;
+  rssi_dbm: number | null;
+  signal_pct: number | null;
+  rssi_estimated: boolean;
+  band: WifiBand | null;
+  channel: number | null;
+  frequency_mhz: number | null;
+  radio_type: string | null;
+  rx_rate_mbps: number | null;
+  tx_rate_mbps: number | null;
+  signal_quality: SignalQuality | null;
+  source: string;
+  error: string | null;
   simulated: boolean;
 }
 
@@ -75,6 +103,7 @@ export interface TelemetryFrame {
   hops: Record<HopId, HopStats>;
   bandwidth: BandwidthStats;
   diagnosis: Diagnosis;
+  wifi?: WifiInfo | null;
 }
 
 export interface Incident {
@@ -120,13 +149,51 @@ export interface ChaosState {
   available: ChaosMode[];
 }
 
+export type StressTestState = 'idle' | 'running' | 'completed' | 'failed' | 'aborted';
+export type BufferbloatGrade = 'A+' | 'A' | 'B' | 'C' | 'D' | 'F' | '?';
+
+export interface StressTestResult {
+  grade: BufferbloatGrade;
+  unloaded_gateway_ms: number | null;
+  unloaded_wan_ms: number | null;
+  loaded_gateway_median_ms: number | null;
+  loaded_gateway_p95_ms: number | null;
+  loaded_wan_median_ms: number | null;
+  loaded_wan_p95_ms: number | null;
+  inflation_ms: number | null;
+  inflation_multiplier: number | null;
+  peak_download_mbps: number;
+  peak_upload_mbps: number;
+  bytes_downloaded: number;
+  bytes_uploaded: number;
+  loaded_samples: number;
+  lost_samples: number;
+  endpoint: string | null;
+  recommendation: string | null;
+  reference_hop: 'wan' | 'gateway';
+}
+
+export interface StressTestStatus {
+  state: StressTestState;
+  test_id: string | null;
+  started_at: number | null;
+  finished_at: number | null;
+  duration_s: number;
+  progress: number;
+  live_download_mbps: number;
+  live_upload_mbps: number;
+  result: StressTestResult | null;
+  error: string | null;
+}
+
 export type IncidentEvent = 'opened' | 'updated' | 'closed';
 
 export type ServerMessage =
-  | { type: 'snapshot'; frames: TelemetryFrame[] }
+  | { type: 'snapshot'; frames: TelemetryFrame[]; stress_test?: StressTestStatus }
   | { type: 'telemetry'; frame: TelemetryFrame }
   | { type: 'incident'; event: IncidentEvent; incident: Incident }
   | { type: 'chaos'; mode: ChaosMode; since: number | null }
+  | { type: 'stress_test'; status: StressTestStatus }
   | { type: 'pong' };
 
 export type ConnectionState = 'connecting' | 'open' | 'reconnecting' | 'offline';

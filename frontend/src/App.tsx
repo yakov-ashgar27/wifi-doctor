@@ -4,6 +4,7 @@ import TopologyMap from './components/TopologyMap';
 import TelemetryCharts from './components/TelemetryCharts';
 import ChaosControls from './components/ChaosControls';
 import IncidentTable from './components/IncidentTable';
+import StressTestPanel from './components/StressTestPanel';
 import { useTelemetry } from './hooks/useTelemetry';
 
 export default function App() {
@@ -14,7 +15,10 @@ export default function App() {
       <Header connection={t.connection} reconnectAttempt={t.reconnectAttempt} latest={t.latest} onReconnect={t.reconnectNow} />
       <main className="mx-auto flex max-w-[1500px] flex-col gap-4 px-4 py-5 sm:px-6">
         <VerdictBanner frame={t.latest} />
-        <ChaosControls mode={t.chaosMode} disabled={t.connection !== 'open'} />
+        <div className="grid gap-4 xl:grid-cols-[minmax(0,1fr)_360px]">
+          <ChaosControls mode={t.chaosMode} disabled={t.connection !== 'open' || t.stressTest?.state === 'running'} />
+          <StressTestPanel status={t.stressTest} chaosMode={t.chaosMode} connected={t.connection === 'open'} />
+        </div>
         <TopologyMap frame={t.latest} />
         <TelemetryCharts history={t.history} />
         <IncidentTable refreshKey={t.incidentVersion} />

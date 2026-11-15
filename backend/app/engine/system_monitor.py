@@ -24,6 +24,7 @@ from typing import Any
 import psutil
 
 from ..config import Settings
+from .wifi_stats import WifiInfo, collect_wifi_info
 
 log = logging.getLogger("wifi_doctor.system")
 
@@ -92,6 +93,13 @@ class SystemMonitor:
         self._top_process: dict[str, Any] | None = None
         self._io_prev: dict[int, tuple[int, float]] = {}
         self._own_pid = os.getpid()
+        self.wifi: WifiInfo | None = None
+
+    # ------------------------------------------------------------ Wi-Fi PHY
+    def refresh_wifi(self) -> WifiInfo:
+        """Blocking (shells out) - call from a worker thread every few seconds."""
+        self.wifi = collect_wifi_info(self.interface)
+        return self.wifi
 
     # ------------------------------------------------------------- counters
     def set_interface(self, nic: str | None) -> None:
@@ -150,9 +158,15 @@ class SystemMonitor:
             peak_upload_mbps=peak_ul,
             interface=self.interface,
             link_speed_mbps=self._link_speed(),
-            is_wireless=_is_wireless(self.interface),
+            is_wireless=self._wireless_flag(),
             top_process=self._top_process,
         )
+
+    def _wireless_flag(self) -> bool | None:
+        # Real PHY data beats the interface-name heuristic when we have it.
+        if self.wifi is not None and self.wifi.source not in ("none", "error") and not self.wifi.error:
+            return self.wifi.is_wireless
+        return _is_wireless(self.interface)
 
     # ---------------------------------------------------------- top process
     @staticmethod

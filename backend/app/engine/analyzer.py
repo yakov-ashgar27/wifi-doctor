@@ -35,6 +35,7 @@ import numpy as np
 from ..config import Settings
 from .prober import HOP_DNS, HOP_GATEWAY, HOP_WAN, NetworkInfo, ProbeSample
 from .system_monitor import BandwidthSnapshot
+from .wifi_stats import WifiInfo
 
 HEALTHY, WARNING, CRITICAL, UNKNOWN = "HEALTHY", "WARNING", "CRITICAL", "UNKNOWN"
 LAYER_NONE, LOCAL_WIFI, ISP_WAN, DNS_SERVER, BUFFERBLOAT = (
@@ -72,9 +73,66 @@ class HopStats:
     last_ok: bool
     status: str
     simulated: bool = False
+    # Adaptive baseline (robust z-score). Optional / backward compatible.
+    baseline_median_ms: float | None = None
+    baseline_sigma_ms: float | None = None
+    baseline_samples: int = 0
+    z_score: float | None = None
+    anomaly: bool = False
 
     def to_dict(self) -> dict[str, Any]:
         return asdict(self)
+
+
+class BaselineTracker:
+    """Long rolling buffer of *good* RTTs with a robust (median/MAD) z-score.
+
+    sigma = max(1.4826 * MAD, floor): 1.4826 makes the MAD a consistent
+    estimator of the standard deviation for normal data, and the floor stops
+    ultra-stable wired links (MAD ~ 0) from turning 0.3 ms of noise into z=10.
+    """
+
+    MAD_TO_SIGMA = 1.4826
+
+    def __init__(self, maxlen: int, min_samples: int, sigma_floor_ms: float, admit_every: int = 10):
+        self.samples: deque[float] = deque(maxlen=maxlen)
+        self.min_samples = min_samples
+        self.sigma_floor_ms = sigma_floor_ms
+        self.admit_every = max(1, admit_every)
+        self._held = 0
+
+    @property
+    def ready(self) -> bool:
+        return len(self.samples) >= self.min_samples
+
+    def reset(self) -> None:
+        self.samples.clear()
+        self._held = 0
+
+    def stats(self) -> tuple[float | None, float | None]:
+        if not self.samples:
+            return None, None
+        arr = np.fromiter(self.samples, dtype=float)
+        median = float(np.median(arr))
+        mad = float(np.median(np.abs(arr - median)))
+        return median, max(self.MAD_TO_SIGMA * mad, self.sigma_floor_ms)
+
+    def zscore(self, value: float | None) -> float | None:
+        median, sigma = self.stats()
+        if value is None or median is None or sigma is None:
+            return None
+        return (value - median) / sigma
+
+    def observe(self, rtt_ms: float | None, anomalous: bool = False) -> None:
+        """Admit a good sample. While anomalous only every Nth sample enters,
+        so a sustained fault cannot quickly redefine 'normal'."""
+        if rtt_ms is None:
+            return
+        if anomalous:
+            self._held += 1
+            if self._held % self.admit_every:
+                return
+        self.samples.append(float(rtt_ms))
 
 
 class HopWindow:
@@ -146,6 +204,7 @@ class TelemetryFrame:
     hops: dict[str, HopStats]
     bandwidth: BandwidthSnapshot
     diagnosis: Diagnosis
+    wifi: WifiInfo | None = None
 
     def to_dict(self) -> dict[str, Any]:
         return {
@@ -156,6 +215,7 @@ class TelemetryFrame:
             "hops": {k: v.to_dict() for k, v in self.hops.items()},
             "bandwidth": self.bandwidth.to_dict(),
             "diagnosis": self.diagnosis.to_dict(),
+            "wifi": self.wifi.to_dict() if self.wifi else None,
         }
 
 
@@ -172,11 +232,32 @@ class Analyzer:
     def __init__(self, settings: Settings):
         self.s = settings
         self.windows = {h: HopWindow(h, settings.window_size) for h in (HOP_GATEWAY, HOP_WAN, HOP_DNS)}
+        self.baselines = {
+            h: BaselineTracker(
+                settings.baseline_window_size,
+                settings.baseline_min_samples,
+                settings.baseline_sigma_floor_ms,
+                settings.baseline_anomaly_admit_every,
+            )
+            for h in (HOP_GATEWAY, HOP_WAN, HOP_DNS)
+        }
+        self._network_key: tuple[str | None, str | None] | None = None
         self.tick = 0
 
-    def reset(self) -> None:
+    def reset(self, baselines: bool = False) -> None:
         for w in self.windows.values():
             w.clear()
+        if baselines:
+            for b in self.baselines.values():
+                b.reset()
+
+    def _anomaly_floor(self, hop: str) -> float:
+        s = self.s
+        return {
+            HOP_GATEWAY: s.anomaly_floor_gateway_ms,
+            HOP_WAN: s.anomaly_floor_wan_ms,
+            HOP_DNS: s.anomaly_floor_dns_ms,
+        }[hop]
 
     # --------------------------------------------------------- hop status
     def _hop_thresholds(self, hop: str) -> tuple[float, float]:
@@ -187,14 +268,14 @@ class Analyzer:
             HOP_DNS: (s.dns_warn_ms, s.dns_crit_ms),
         }[hop]
 
-    def _hop_status(self, hop: str, m: dict[str, Any], has_target: bool) -> str:
+    def _hop_status(self, hop: str, m: dict[str, Any], has_target: bool, anomaly: bool = False) -> str:
         if not has_target or m["samples"] == 0:
             return UNKNOWN
         warn, crit = self._hop_thresholds(hop)
         rtt, loss = m["recent_ms"], m["recent_loss_pct"]
         if loss >= self.s.loss_crit_pct or rtt is None or rtt > crit:
             return CRITICAL
-        if loss > self.s.loss_warn_pct or rtt > warn:
+        if loss > self.s.loss_warn_pct or rtt > warn or anomaly:
             return WARNING
         return HEALTHY
 
@@ -205,14 +286,36 @@ class Analyzer:
         bandwidth: BandwidthSnapshot,
         network: NetworkInfo,
         chaos_mode: str = "none",
+        wifi: WifiInfo | None = None,
     ) -> TelemetryFrame:
         self.tick += 1
+        # A different gateway/resolver is a different network: start a new baseline.
+        key = (network.gateway_ip, network.dns_server)
+        if self._network_key is not None and key != self._network_key:
+            for b in self.baselines.values():
+                b.reset()
+        self._network_key = key
+
         hops: dict[str, HopStats] = {}
         for hop, window in self.windows.items():
             sample = probes[hop]
             if sample.target is not None:
                 window.add(sample)
             m = window.compute(self.s.recent_rtt_samples, self.s.recent_loss_samples)
+
+            baseline = self.baselines[hop]
+            b_median, b_sigma = baseline.stats()
+            z = baseline.zscore(m["recent_ms"])
+            anomaly = bool(
+                baseline.ready
+                and z is not None
+                and z > self.s.zscore_threshold
+                and m["recent_ms"] is not None
+                and m["recent_ms"] > self._anomaly_floor(hop)
+            )
+            # Simulated (chaos) samples never pollute the learned baseline.
+            if sample.target is not None and not sample.simulated:
+                baseline.observe(sample.rtt_ms, anomalous=anomaly)
             hops[hop] = HopStats(
                 hop=hop,
                 label=HOP_LABELS[hop],
@@ -229,10 +332,15 @@ class Analyzer:
                 recent_loss_pct=round(m["recent_loss_pct"], 1),
                 samples=m["samples"],
                 last_ok=m["last_ok"],
-                status=self._hop_status(hop, m, sample.target is not None),
+                status=self._hop_status(hop, m, sample.target is not None, anomaly),
                 simulated=sample.simulated,
+                baseline_median_ms=_r(b_median),
+                baseline_sigma_ms=_r(b_sigma),
+                baseline_samples=len(baseline.samples),
+                z_score=_r(z),
+                anomaly=anomaly,
             )
-        diagnosis = self.diagnose(hops, bandwidth)
+        diagnosis = self.diagnose(hops, bandwidth, wifi)
         return TelemetryFrame(
             tick=self.tick,
             timestamp=time.time(),
@@ -241,10 +349,11 @@ class Analyzer:
             hops=hops,
             bandwidth=bandwidth,
             diagnosis=diagnosis,
+            wifi=wifi,
         )
 
     # ------------------------------------------------------------- the RCA
-    def diagnose(self, hops: dict[str, HopStats], bw: BandwidthSnapshot) -> Diagnosis:
+    def diagnose(self, hops: dict[str, HopStats], bw: BandwidthSnapshot, wifi: WifiInfo | None = None) -> Diagnosis:
         s = self.s
         gw, wan, dns = hops[HOP_GATEWAY], hops[HOP_WAN], hops[HOP_DNS]
 
@@ -270,7 +379,17 @@ class Analyzer:
             "upload_mbps": round(bw.upload_mbps, 2),
             "utilization_pct": util,
             "top_process": top,
+            "gateway_z": gw.z_score,
+            "wan_z": wan.z_score,
+            "dns_z": dns.z_score,
+            "gateway_baseline_ms": gw.baseline_median_ms,
+            "wan_baseline_ms": wan.baseline_median_ms,
+            "dns_baseline_ms": dns.baseline_median_ms,
         }
+        if wifi is not None and wifi.is_wireless:
+            evidence.update(
+                rssi_dbm=wifi.rssi_dbm, wifi_band=wifi.band, wifi_channel=wifi.channel, wifi_ssid=wifi.ssid
+            )
 
         def verdict(status, layer, conf, title, expl, action) -> Diagnosis:
             return Diagnosis(status, layer, int(max(5, min(99, round(conf)))), title, expl, action, evidence)
@@ -298,11 +417,27 @@ class Analyzer:
                 "and look at the router's WAN/Internet LED.",
             )
 
-        gw_bad = gw_known and (gw_rtt > s.gateway_warn_ms or gw_loss > s.loss_warn_pct)
-        gw_clean = (not gw_known) or (gw_rtt < s.gateway_healthy_ms and gw_loss == 0)
-        wan_bad = wan_rtt > s.wan_warn_ms or wan_loss > s.loss_warn_pct
-        dns_bad = dns_rtt > s.dns_warn_ms or dns_loss > s.loss_warn_pct
+        # Hybrid triggering: static thresholds stay as hard guardrails, and the
+        # adaptive z-score flags degradations that are abnormal *for this network*.
+        gw_anom = gw_known and gw.anomaly
+        wan_anom, dns_anom = wan.anomaly, dns.anomaly
+        gw_static_bad = gw_known and (gw_rtt > s.gateway_warn_ms or gw_loss > s.loss_warn_pct)
+        wan_static_bad = wan_rtt > s.wan_warn_ms or wan_loss > s.loss_warn_pct
+        dns_static_bad = dns_rtt > s.dns_warn_ms or dns_loss > s.loss_warn_pct
+        gw_bad = gw_static_bad or gw_anom
+        wan_bad = wan_static_bad or wan_anom
+        dns_bad = dns_static_bad or dns_anom
+        gw_clean = (not gw_known) or (gw_rtt < s.gateway_healthy_ms and gw_loss == 0 and not gw_anom)
         wan_ok = not wan_bad and wan_rtt <= s.wan_bloat_ms
+
+        def z_ex(h: HopStats) -> float:
+            """0..1 strength of an anomaly (1 == z at twice the threshold)."""
+            if not h.anomaly or h.z_score is None:
+                return 0.0
+            return max(0.0, min(1.0, (h.z_score - s.zscore_threshold) / s.zscore_threshold))
+
+        def z_bonus(h: HopStats) -> float:
+            return 4.0 + 6.0 * z_ex(h) if h.anomaly else 0.0
 
         def severity(*pairs: tuple[float, float], loss: float = 0.0) -> str:
             if loss >= s.loss_crit_pct or any(v > c for v, c in pairs):
@@ -310,14 +445,16 @@ class Analyzer:
             return WARNING
 
         # ---- 1. bufferbloat
-        bloat_latency = (gw_known and gw_rtt > s.gateway_bloat_ms) or wan_rtt > s.wan_bloat_ms
+        bloat_latency = (gw_known and gw_rtt > s.gateway_bloat_ms) or wan_rtt > s.wan_bloat_ms or gw_anom or wan_anom
         if bloat_latency and util > s.bloat_utilization_pct:
             ex = max(
                 _excess(gw_rtt, s.gateway_bloat_ms) if gw_known else 0.0,
                 _excess(wan_rtt, s.wan_bloat_ms),
+                z_ex(gw), z_ex(wan),
             )
             util_factor = (util - s.bloat_utilization_pct) / (100 - s.bloat_utilization_pct)
-            conf = 58 + 18 * ex + 14 * util_factor + sample_bonus + (4 if dns_rtt < s.dns_warn_ms else 0)
+            conf = (58 + 18 * ex + 14 * util_factor + sample_bonus + (4 if dns_rtt < s.dns_warn_ms else 0)
+                    + max(z_bonus(gw), z_bonus(wan)) / 2)
             hog = f" The heaviest network user right now is '{top}'." if top else ""
             direction = "upload" if bw.upload_mbps / bw.peak_upload_mbps > bw.download_mbps / bw.peak_download_mbps else "download"
             return verdict(
@@ -326,14 +463,20 @@ class Analyzer:
                 f"Your link is running at {util:.0f}% of its observed peak ({bw.download_mbps:.1f} Mbps down / "
                 f"{bw.upload_mbps:.1f} Mbps up) and latency has inflated to {self._fmt(gw_rtt)} at the gateway and "
                 f"{self._fmt(wan_rtt)} to the Internet. Packets are queuing in an oversized router buffer, so "
-                f"interactive traffic (calls, games, browsing) waits behind the bulk {direction}.{hog}",
+                f"interactive traffic (calls, games, browsing) waits behind the bulk {direction}.{hog}"
+                f"{self._baseline_note(wan if wan.anomaly else gw)}",
                 "Pause or rate-limit the bulk transfer, and enable Smart Queue Management (SQM: fq_codel or CAKE) "
                 "on your router, setting its shaper to ~90% of your plan's speed. QoS for real-time apps also helps.",
             )
 
         # ---- 2. local Wi-Fi / LAN
         if gw_bad:
-            ex = max(_excess(gw_rtt, s.gateway_warn_ms), _excess(gw_loss, s.loss_warn_pct) if gw_loss > 0 else 0)
+            ex = max(
+                _excess(gw_rtt, s.gateway_warn_ms) if gw_static_bad else 0.0,
+                _excess(gw_loss, s.loss_warn_pct) if gw_loss > 0 else 0,
+                z_ex(gw),
+            )
+            phys_text, phys_action, phys_bonus = self._wifi_evidence(wifi)
             downstream_follows = wan_rtt >= gw_rtt  # WAN latency inherits the local delay
             low_traffic = traffic < s.local_bw_limit_mbps
             conf = (
@@ -341,6 +484,7 @@ class Analyzer:
                 + (8 if downstream_follows else 0)
                 + (6 if gw.jitter_ms and gw.jitter_ms > 10 else 0)
                 - (0 if low_traffic else 18)
+                + z_bonus(gw) + phys_bonus
             )
             load_note = (
                 f"Local traffic is low ({traffic:.1f} Mbps), so this is not caused by your own downloads."
@@ -353,16 +497,21 @@ class Analyzer:
                 "Wi-Fi signal degradation or router congestion",
                 f"The very first hop is unhealthy: the gateway ({gw.target}) answers in {self._fmt(gw_rtt)} with "
                 f"{gw_loss:.0f}% loss and {self._fmt(gw.jitter_ms)} jitter, where a healthy LAN is under "
-                f"{s.gateway_healthy_ms:.0f} ms. Every packet to the Internet must cross this hop first. {load_note}",
-                "Move closer to the router or remove obstructions, switch to the 5 GHz / 6 GHz band, change to a "
+                f"{s.gateway_healthy_ms:.0f} ms. Every packet to the Internet must cross this hop first. {load_note}"
+                f"{self._baseline_note(gw)}{phys_text}",
+                f"{phys_action}Move closer to the router or remove obstructions, switch to the 5 GHz / 6 GHz band, change to a "
                 "less congested Wi-Fi channel, and reboot the router. If it persists, test with an Ethernet cable "
                 "to confirm the wireless link is the culprit.",
             )
 
         # ---- 3. ISP / WAN
         if wan_bad:
-            ex = max(_excess(wan_rtt, s.wan_warn_ms), _excess(wan_loss, s.loss_warn_pct) if wan_loss > 0 else 0)
-            conf = 58 + 22 * ex + sample_bonus + (12 if gw_clean else 0)
+            ex = max(
+                _excess(wan_rtt, s.wan_warn_ms) if wan_static_bad else 0.0,
+                _excess(wan_loss, s.loss_warn_pct) if wan_loss > 0 else 0,
+                z_ex(wan),
+            )
+            conf = 58 + 22 * ex + sample_bonus + (12 if gw_clean else 0) + z_bonus(wan)
             gw_note = (
                 f"Your local network is clean (gateway {self._fmt(gw_rtt)}, 0% loss), so the problem is beyond your router."
                 if gw_clean and gw_known
@@ -374,7 +523,7 @@ class Analyzer:
                 severity((wan_rtt, s.wan_crit_ms), loss=wan_loss), ISP_WAN, conf,
                 "ISP backbone congestion or upstream routing issue",
                 f"Latency to {wan.target} is {self._fmt(wan_rtt)} with {wan_loss:.0f}% packet loss and "
-                f"{self._fmt(wan.jitter_ms)} jitter. {gw_note}",
+                f"{self._fmt(wan.jitter_ms)} jitter. {gw_note}{self._baseline_note(wan)}",
                 "Power-cycle the modem/ONT, then check your ISP's status page. If degradation persists, export the "
                 "ISP Evidence Report (CSV) below and open a ticket with your provider — it timestamps the loss and "
                 "proves your local network was healthy.",
@@ -383,8 +532,12 @@ class Analyzer:
         # ---- 4. DNS
         if dns_bad and wan_ok:
             failing = dns_loss > s.loss_warn_pct
-            ex = max(_excess(dns_rtt, s.dns_warn_ms), _excess(dns_loss, s.loss_warn_pct) if failing else 0)
-            conf = 62 + 22 * ex + sample_bonus + (8 if gw_clean else 0)
+            ex = max(
+                _excess(dns_rtt, s.dns_warn_ms) if dns_static_bad else 0.0,
+                _excess(dns_loss, s.loss_warn_pct) if failing else 0,
+                z_ex(dns),
+            )
+            conf = 62 + 22 * ex + sample_bonus + (8 if gw_clean else 0) + z_bonus(dns)
             what = (
                 f"{dns_loss:.0f}% of DNS queries are timing out"
                 if failing else f"name resolution takes {self._fmt(dns_rtt)}"
@@ -394,7 +547,7 @@ class Analyzer:
                 "Slow or unresponsive DNS resolver",
                 f"Connectivity itself is fine (gateway {self._fmt(gw_rtt)}, WAN {self._fmt(wan_rtt)}), but {what} "
                 f"against resolver {dns.target}. Every new website or app connection waits on DNS before it can "
-                "start, which feels like a slow Internet even though bandwidth is fine.",
+                f"start, which feels like a slow Internet even though bandwidth is fine.{self._baseline_note(dns)}",
                 "Switch your DNS to a fast public resolver such as 1.1.1.1 / 1.0.0.1 (Cloudflare) or 8.8.8.8 / "
                 "8.8.4.4 (Google), on this device or on the router's DHCP settings so all devices benefit.",
             )
@@ -411,6 +564,37 @@ class Analyzer:
             "Every hop is inside its normal operating envelope.",
             "No action needed. Use the Chaos Simulation bar to see how WiFi-Doctor diagnoses real faults.",
         )
+
+    def _baseline_note(self, h: HopStats) -> str:
+        if not h.anomaly or h.baseline_median_ms is None or h.z_score is None:
+            return ""
+        return (
+            f" That is abnormal for this network: the learned baseline for this hop is "
+            f"{self._fmt(h.baseline_median_ms)} (robust z-score {h.z_score:+.1f} over "
+            f"{h.baseline_samples} samples)."
+        )
+
+    def _wifi_evidence(self, wifi: WifiInfo | None) -> tuple[str, str, float]:
+        """Physical-layer corroboration for a LOCAL_WIFI verdict."""
+        if wifi is None or not wifi.is_wireless:
+            return "", "", 0.0
+        weak = wifi.rssi_dbm is not None and wifi.rssi_dbm < self.s.wifi_weak_rssi_dbm
+        on_24 = wifi.band == "2.4 GHz"
+        if not (weak or on_24):
+            return "", "", 0.0
+        signal = f"{wifi.rssi_dbm} dBm" if wifi.rssi_dbm is not None else "unknown strength"
+        where = f" on {wifi.band}" if wifi.band else ""
+        if wifi.channel is not None:
+            where += f" channel {wifi.channel}"
+        label = "Weak Wi-Fi signal" if weak else "Wi-Fi signal"
+        text = f" Physical layer: {label.lower()} ({signal}){where}."
+        if weak and on_24:
+            action = f"{label} ({signal}){where}: switch to 5 GHz or move closer to the router. "
+        elif weak:
+            action = f"{label} ({signal}){where}: move closer to the router or remove obstructions. "
+        else:
+            action = f"You are on the congested 2.4 GHz band{(' channel ' + str(wifi.channel)) if wifi.channel else ''}: switch to 5 GHz. "
+        return text, action, (8.0 if weak else 0.0) + (3.0 if on_24 else 0.0)
 
     @staticmethod
     def _fmt(ms: float | None) -> str:

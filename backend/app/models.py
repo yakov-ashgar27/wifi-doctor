@@ -103,6 +103,61 @@ class IncidentPage(BaseModel):
     pages: int
 
 
+class WifiInfoOut(BaseModel):
+    """Physical Wi-Fi layer snapshot (all fields optional: Ethernet / no adapter -> is_wireless=False)."""
+
+    is_wireless: bool = False
+    interface: str | None = None
+    ssid: str | None = None
+    rssi_dbm: int | None = None
+    signal_pct: int | None = None
+    rssi_estimated: bool = False
+    band: str | None = None
+    channel: int | None = None
+    frequency_mhz: int | None = None
+    radio_type: str | None = None
+    rx_rate_mbps: float | None = None
+    tx_rate_mbps: float | None = None
+    signal_quality: str | None = None
+    source: str = "none"
+    error: str | None = None
+    simulated: bool = False
+
+
+class StressTestResultOut(BaseModel):
+    grade: str
+    unloaded_gateway_ms: float | None = None
+    unloaded_wan_ms: float | None = None
+    loaded_gateway_median_ms: float | None = None
+    loaded_gateway_p95_ms: float | None = None
+    loaded_wan_median_ms: float | None = None
+    loaded_wan_p95_ms: float | None = None
+    inflation_ms: float | None = None
+    inflation_multiplier: float | None = None
+    peak_download_mbps: float = 0.0
+    peak_upload_mbps: float = 0.0
+    bytes_downloaded: int = 0
+    bytes_uploaded: int = 0
+    loaded_samples: int = 0
+    lost_samples: int = 0
+    endpoint: str | None = None
+    recommendation: str | None = None
+    reference_hop: str = "wan"
+
+
+class StressTestStatusOut(BaseModel):
+    state: str  # idle | running | completed | failed | aborted
+    test_id: str | None = None
+    started_at: float | None = None
+    finished_at: float | None = None
+    duration_s: float
+    progress: float = 0.0
+    live_download_mbps: float = 0.0
+    live_upload_mbps: float = 0.0
+    result: StressTestResultOut | None = None
+    error: str | None = None
+
+
 class ChaosState(BaseModel):
     mode: str
     since: float | None = Field(default=None, description="Epoch seconds when the mode was set")

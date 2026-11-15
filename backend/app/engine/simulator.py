@@ -25,6 +25,7 @@ from enum import Enum
 
 from .prober import HOP_DNS, HOP_GATEWAY, HOP_WAN, ProbeSample
 from .system_monitor import BandwidthSnapshot
+from .wifi_stats import WifiInfo
 
 
 class ChaosMode(str, Enum):
@@ -122,3 +123,26 @@ class ChaosSimulator:
             )
 
         return {HOP_GATEWAY: gw, HOP_WAN: wan, HOP_DNS: dns}, bw
+
+    def apply_wifi(self, wifi: WifiInfo | None) -> WifiInfo | None:
+        """Wi-Fi lag also degrades the radio picture, so the PHY evidence path
+        of the RCA can be demonstrated on any network."""
+        if self.mode != ChaosMode.WIFI_LAG:
+            return wifi
+        base = wifi if wifi is not None else WifiInfo()
+        return replace(
+            base,
+            is_wireless=True,
+            ssid=base.ssid or "chaos-lab",
+            rssi_dbm=-79 + self._rng.randint(-2, 2),
+            signal_pct=None,
+            rssi_estimated=False,
+            band="2.4 GHz",
+            channel=6,
+            frequency_mhz=2437,
+            rx_rate_mbps=26.0,
+            tx_rate_mbps=19.5,
+            source=base.source if base.source != "none" else "chaos",
+            error=None,
+            simulated=True,
+        )

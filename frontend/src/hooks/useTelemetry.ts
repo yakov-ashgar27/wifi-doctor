@@ -5,6 +5,7 @@ import type {
   Incident,
   IncidentEvent,
   ServerMessage,
+  StressTestStatus,
   TelemetryFrame,
 } from '../types/telemetry';
 
@@ -35,6 +36,7 @@ export interface TelemetryState {
   chaosMode: ChaosMode;
   incidentVersion: number;
   lastIncident: LastIncidentEvent | null;
+  stressTest: StressTestStatus | null;
   reconnectNow: () => void;
 }
 
@@ -54,6 +56,7 @@ export function useTelemetry(): TelemetryState {
   const [chaosMode, setChaosMode] = useState<ChaosMode>('none');
   const [incidentVersion, setIncidentVersion] = useState(0);
   const [lastIncident, setLastIncident] = useState<LastIncidentEvent | null>(null);
+  const [stressTest, setStressTest] = useState<StressTestStatus | null>(null);
 
   const wsRef = useRef<WebSocket | null>(null);
   const retryTimer = useRef<number | null>(null);
@@ -81,6 +84,7 @@ export function useTelemetry(): TelemetryState {
           setLatest(last);
           setChaosMode(last.chaos_mode);
         }
+        if (msg.stress_test) setStressTest(msg.stress_test);
         break;
       }
       case 'telemetry':
@@ -99,6 +103,9 @@ export function useTelemetry(): TelemetryState {
         break;
       case 'chaos':
         setChaosMode(msg.mode);
+        break;
+      case 'stress_test':
+        setStressTest(msg.status);
         break;
       default:
         break;
@@ -220,6 +227,7 @@ export function useTelemetry(): TelemetryState {
     chaosMode,
     incidentVersion,
     lastIncident,
+    stressTest,
     reconnectNow,
   };
 }

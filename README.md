@@ -43,6 +43,9 @@ Packet sniffers such as Wireshark show you everything and conclude nothing. WiFi
 - **Multi-layer active probing**: Gateway (Wi-Fi/LAN) → ISP/WAN (`1.1.1.1`, `8.8.8.8` backup) → DNS (real UDP/53 A-record queries).
 - **Deterministic RCA engine** with five verdicts (`LOCAL_WIFI`, `BUFFERBLOAT`, `ISP_WAN`, `DNS_SERVER`, `HEALTHY`), each with a confidence score and remediation steps.
 - **Rolling-window telemetry math** with NumPy: current, average and P95 RTT, jitter, and packet loss per hop.
+- **Adaptive anomaly baselines**: a ~10-minute robust baseline per hop (median + MAD) yields a z-score, so a jump from 12 ms to 60 ms is caught on *your* network even though it is below every static threshold.
+- **Physical Wi-Fi telemetry**: RSSI, band, channel, SSID and PHY rates from `netsh` (Windows, locale-tolerant), `iw` / `/proc/net/wireless` (Linux) and `airport` / `system_profiler` (macOS), used as evidence in Wi-Fi diagnoses.
+- **Active Bufferbloat test**: an 8-second on-demand load test compares loaded and unloaded latency and grades your connection from A+ to F.
 - **Bandwidth and process correlation** through `psutil`: live Mbps, observed peak, utilisation %, and the top network-consuming process.
 - **Graceful probe degradation**: `scapy` raw ICMP → unprivileged ICMP sockets → OS `ping` → TCP handshake RTT.
 - **Chaos Engineering mode** that injects realistic faults, so you can watch a full diagnosis even on a healthy network.
@@ -113,6 +116,28 @@ The verdict is based on a short "recent" view: the median of the last 8 good RTT
 **Severity:** `CRITICAL` when loss is ≥ 10 % or latency exceeds the critical threshold for that hop (Gateway 100 ms · WAN 300 ms · DNS 500 ms). Otherwise `WARNING`.
 
 **Confidence score (0–99):** combines *how far* the metrics exceed their thresholds, *how cleanly* the other layers isolate the fault (for example, a clean gateway raises confidence in an ISP verdict), and *how many samples* support it. Weaker fallback branches (such as a degraded gateway under moderate load) are scored lower on purpose.
+
+### Adaptive baselines (hybrid triggering)
+
+Static thresholds remain the hard guardrails. In addition, every hop keeps a rolling buffer of its last **400 good samples** (`BASELINE_WINDOW_SIZE`, ~10 min). From it the analyzer computes a **robust z-score** for the recent RTT median:
+
+```
+z = (recent_median - baseline_median) / max(1.4826 × MAD, 1 ms)
+```
+
+A hop is flagged as an **anomaly** when the baseline has at least **60 samples**, **z > 3.5**, and the RTT is above a noise floor (gateway 15 ms, WAN 35 ms, DNS 45 ms). Anomalies feed the same decision tree as static breaches, add to the confidence score in proportion to z, and are reported as `WARNING` unless a static critical threshold is also crossed. Chaos-simulated samples never enter the baseline, samples taken during an anomaly are throttled (1 in 10), and the baseline resets when the gateway or resolver changes. The dashboard shows *"Normal baseline: 12 ms (Z: +8.4)"* under each hop.
+
+### Physical-layer evidence
+
+When `LOCAL_WIFI` fires and the radio is weak (RSSI **< −72 dBm**) or on **2.4 GHz**, the diagnosis cites it directly: *"Weak Wi-Fi signal (−78 dBm) on 2.4 GHz channel 6: switch to 5 GHz or move closer to the router."* The confidence score also rises, because the physical measurement backs up the latency evidence. On Windows 11 24H2+, `netsh` needs **Location services** turned on to report Wi-Fi details; without them the dashboard says so, and the RCA uses latency only.
+
+### Bufferbloat grade
+
+| Latency increase under load | < 5 ms | < 30 ms | < 60 ms | < 200 ms | < 400 ms | ≥ 400 ms |
+|---|---|---|---|---|---|---|
+| **Grade** | A+ | A | B | C | D | F |
+
+Grades C–F include an SQM/QoS recommendation. The test runs 3 streaming downloads and 1 upload against Cloudflare's speed-test endpoints (with fallbacks) for 8 s while the prober keeps measuring. Only one test can run at a time (HTTP **409** otherwise, also while a chaos simulation is active), and a 10 s watchdog aborts any test that overruns.
 
 **Edge cases handled:**
 
@@ -186,6 +211,8 @@ npm run dev          # http://localhost:5173 (proxies /api and /ws to :8000)
 2. Click **Simulate ISP Loss**. Within a few ticks the WAN node turns red, the latency chart spikes, and the verdict becomes **ISP backbone congestion** with high confidence.
 3. Click **Normal**. The incident closes in the history table with its duration and worst-case metrics.
 4. Click **Download ISP Evidence Report (CSV)**.
+5. With the simulation on **Normal**, click **Run Bufferbloat Test (8s)** to grade your real connection under load.
+6. Try **Simulate Wi-Fi Lag**. The gateway badge switches to a weak 2.4 GHz signal, and the diagnosis cites the physical evidence.
 
 Simulated incidents are flagged (🧪 in the UI, `simulated=yes` in the CSV). Tick **Real incidents only** to keep them out of the report you send to your ISP.
 
@@ -195,12 +222,14 @@ Simulated incidents are flagged (🧪 in the UI, `simulated=yes` in the CSV). Ti
 
 | Method | Endpoint | Description |
 |---|---|---|
-| `WS` | `/ws` | Live stream: `snapshot` (last 80 frames on connect), `telemetry` (every tick), `incident` (opened/updated/closed), `chaos` |
+| `WS` | `/ws` | Live stream: `snapshot` (last 80 frames on connect), `telemetry` (every tick, now with per-hop `baseline_median_ms` / `z_score` and a `wifi` block), `incident` (opened/updated/closed), `chaos`, `stress_test` |
 | `GET` | `/api/status` | Latest frame, network info, uptime, connected clients |
 | `GET` | `/api/incidents?page=1&page_size=10&real_only=false&layer=ISP_WAN` | Paginated incident history |
 | `GET` | `/api/incidents/export?real_only=true` | Streamed CSV evidence report (formula-injection safe, Excel-friendly BOM) |
 | `GET` | `/api/chaos` | Current fault-injection mode |
 | `POST` | `/api/chaos/{mode}` | `none` · `wifi_lag` · `isp_loss` · `dns_slowdown` · `bufferbloat` |
+| `POST` | `/api/stress-test/start` | Start the 8 s bufferbloat test (`202`; `409` if one is running or chaos is active) |
+| `GET` | `/api/stress-test/status` | Progress, live Mbps and the graded result |
 | `GET` | `/api/health` | Liveness probe |
 
 ---
@@ -234,11 +263,14 @@ wifi-doctor/
 │   │   │   ├── system_monitor.py# Mbps, NIC detection, top process
 │   │   │   ├── analyzer.py      # Rolling stats + RCA decision engine
 │   │   │   ├── simulator.py     # Chaos / fault injection
-│   │   │   └── recorder.py      # Incident lifecycle → SQLite
+│   │   │   ├── recorder.py      # Incident lifecycle → SQLite
+│   │   │   ├── wifi_stats.py    # RSSI / band / channel parsers (netsh, iw, macOS)
+│   │   │   └── stress_test.py   # Active loaded-vs-unloaded latency test
 │   │   └── routers/
 │   │       ├── incidents.py     # History + CSV export
 │   │       └── control.py       # Chaos control + status
 │   ├── tests/test_rca.py        # Deterministic RCA + chaos tests
+│   ├── tests/test_new_features.py # z-score, Wi-Fi parsers, bufferbloat grading, 409 guard
 │   ├── requirements.txt
 │   └── Dockerfile
 ├── frontend/
@@ -263,7 +295,13 @@ pip install pytest
 python -m pytest -q
 ```
 
-The test suite feeds synthetic probe streams into the analyzer and checks every RCA branch. It also confirms that each chaos mode is diagnosed as the correct layer with ≥ 70 % confidence.
+The test suite feeds synthetic probe streams into the analyzer and checks every RCA branch. It also confirms that each chaos mode is diagnosed as the correct layer with ≥ 70 % confidence. Further tests check:
+
+- the MAD/z-score math and hybrid triggering
+- the Wi-Fi parsers, against captured `netsh` (English and German), `iw`, `/proc/net/wireless` and macOS output, including the Ethernet, disconnected and Location-permission cases
+- the bufferbloat grade scale, the timeout and offline paths, and the HTTP 409 concurrency guard
+
+API tests need `pip install httpx`.
 
 ## Configuration
 
@@ -275,6 +313,10 @@ The test suite feeds synthetic probe streams into the analyzer and checks every 
 | `GATEWAY_IP` / `DNS_SERVER` | auto | Override auto-detection |
 | `PROBE_BACKEND` | auto | Force `scapy`, `icmp_dgram`, `subprocess` or `tcp` |
 | `INCIDENT_COOLDOWN_S` | `30` | Minimum gap between new incidents |
+| `BASELINE_WINDOW_SIZE` / `BASELINE_MIN_SAMPLES` | `400` / `60` | Adaptive baseline length and warm-up |
+| `ZSCORE_THRESHOLD` | `3.5` | Robust z-score that counts as an anomaly |
+| `WIFI_WEAK_RSSI_DBM` | `-72` | RSSI below which Wi-Fi is cited as weak |
+| `STRESS_DURATION_S` / `STRESS_TIMEOUT_S` | `8` / `10` | Bufferbloat test window and hard abort |
 | `DATABASE_URL` | `sqlite+aiosqlite:///./data/wifi_doctor.db` | Storage |
 | `GATEWAY_WARN_MS`, `WAN_WARN_MS`, `DNS_WARN_MS`, `LOSS_WARN_PCT`, `BLOAT_UTILIZATION_PCT`, … | see `config.py` | RCA thresholds |
 

@@ -1,6 +1,6 @@
 import { type ReactNode, useState } from 'react';
-import { Globe, Laptop, type LucideIcon, Router, Server, X } from 'lucide-react';
-import type { HopId, HopStats, HopStatus, RootCauseLayer, TelemetryFrame } from '../types/telemetry';
+import { Globe, Laptop, type LucideIcon, Router, Server, Wifi, X } from 'lucide-react';
+import type { HopId, HopStats, HopStatus, RootCauseLayer, TelemetryFrame, WifiInfo } from '../types/telemetry';
 import { STATUS_TONE, cx, fmtMbps, fmtMs, fmtPct } from '../lib/format';
 
 type NodeId = 'device' | HopId;
@@ -50,6 +50,61 @@ function Connector({ status, active }: { status: HopStatus; active: boolean }) {
   );
 }
 
+const SIGNAL_TONE = {
+  good: 'border-emerald-500/40 bg-emerald-500/10 text-emerald-300',
+  fair: 'border-amber-500/40 bg-amber-500/10 text-amber-300',
+  weak: 'border-rose-500/50 bg-rose-500/10 text-rose-300',
+} as const;
+
+function WifiBadge({ wifi }: { wifi: WifiInfo | null | undefined }) {
+  if (!wifi) return null;
+  if (!wifi.is_wireless) {
+    if (wifi.error === 'location-permission-required') {
+      return (
+        <span className="rounded border border-slate-700 bg-slate-800/60 px-1.5 py-0.5 text-[10px] text-slate-400" title="Windows needs Location services enabled to read Wi-Fi details">
+          Wi-Fi details: enable Location
+        </span>
+      );
+    }
+    return wifi.source === 'none' ? null : (
+      <span className="rounded border border-slate-700 bg-slate-800/60 px-1.5 py-0.5 text-[10px] text-slate-400">Wired / no Wi-Fi</span>
+    );
+  }
+  const tone = wifi.signal_quality ? SIGNAL_TONE[wifi.signal_quality] : 'border-slate-700 bg-slate-800/60 text-slate-300';
+  const parts = [wifi.band, wifi.channel !== null ? `ch ${wifi.channel}` : null].filter(Boolean).join(' · ');
+  return (
+    <span
+      className={cx('num inline-flex items-center gap-1.5 rounded border px-1.5 py-0.5 text-[10px]', tone)}
+      title={`${wifi.ssid ?? 'Wi-Fi'}${wifi.radio_type ? ` · ${wifi.radio_type}` : ''}${wifi.rssi_estimated ? ' · dBm estimated from signal %' : ''}${wifi.simulated ? ' · simulated' : ''}`}
+    >
+      <Wifi className="h-3 w-3" />
+      {parts && <span>{parts}</span>}
+      {wifi.rssi_dbm !== null && (
+        <span className="font-semibold">
+          {wifi.rssi_estimated ? '≈' : ''}
+          {wifi.rssi_dbm} dBm
+        </span>
+      )}
+    </span>
+  );
+}
+
+function BaselineLine({ hop }: { hop: HopStats }) {
+  if (hop.baseline_median_ms === null || hop.baseline_median_ms === undefined) return null;
+  const ready = (hop.baseline_samples ?? 0) >= 60;
+  const z = hop.z_score;
+  return (
+    <div
+      className={cx('num mt-2 truncate text-[10px]', hop.anomaly ? 'text-amber-300' : 'text-slate-500')}
+      title={ready ? 'Robust z-score vs. this network\'s learned baseline (median / MAD)' : `Learning baseline: ${hop.baseline_samples}/60 samples`}
+    >
+      {ready ? 'Normal baseline' : 'Learning'}: {fmtMs(hop.baseline_median_ms)} ms
+      {ready && z !== null && z !== undefined && ` (Z: ${z >= 0 ? '+' : ''}${z.toFixed(1)})`}
+      {hop.anomaly && ' · anomaly'}
+    </div>
+  );
+}
+
 interface NodeProps {
   id: NodeId;
   status: HopStatus;
@@ -58,9 +113,10 @@ interface NodeProps {
   selected: boolean;
   onSelect: (id: NodeId) => void;
   children: ReactNode;
+  footer?: ReactNode;
 }
 
-function Node({ id, status, address, isRoot, selected, onSelect, children }: NodeProps) {
+function Node({ id, status, address, isRoot, selected, onSelect, children, footer }: NodeProps) {
   const tone = STATUS_TONE[status];
   const Icon = ICONS[id];
   return (
@@ -91,6 +147,7 @@ function Node({ id, status, address, isRoot, selected, onSelect, children }: Nod
         <span className={cx('h-2.5 w-2.5 shrink-0 rounded-full', tone.dot, status !== 'HEALTHY' && status !== 'UNKNOWN' && 'animate-pulse')} />
       </div>
       <div className="grid grid-cols-3 gap-2">{children}</div>
+      {footer}
     </button>
   );
 }
@@ -148,6 +205,16 @@ export default function TopologyMap({ frame }: Props) {
               isRoot={rootNode === id}
               selected={selected === id}
               onSelect={toggle}
+              footer={
+                <>
+                  <BaselineLine hop={hops[id]} />
+                  {id === 'gateway' && frame.wifi && (
+                    <div className="mt-2">
+                      <WifiBadge wifi={frame.wifi} />
+                    </div>
+                  )}
+                </>
+              }
             >
               <HopMetrics hop={hops[id]} />
             </Node>
@@ -176,6 +243,13 @@ export default function TopologyMap({ frame }: Props) {
               <Detail label="Jitter" value={`${fmtMs(selectedHop.jitter_ms)} ms`} />
               <Detail label="Loss (30s / 90s)" value={`${fmtPct(selectedHop.recent_loss_pct)} / ${fmtPct(selectedHop.loss_pct)}`} />
               <Detail label="Samples · method" value={`${selectedHop.samples} · ${selectedHop.method}`} />
+              <Detail
+                label="Learned baseline"
+                value={selectedHop.baseline_median_ms != null ? `${fmtMs(selectedHop.baseline_median_ms)} ms ± ${fmtMs(selectedHop.baseline_sigma_ms)}` : '—'}
+              />
+              <Detail label="Robust z-score" value={selectedHop.z_score != null ? `${selectedHop.z_score >= 0 ? '+' : ''}${selectedHop.z_score.toFixed(1)}` : '—'} />
+              <Detail label="Baseline samples" value={`${selectedHop.baseline_samples ?? 0} / 60 min`} />
+              <Detail label="Anomaly" value={selectedHop.anomaly ? 'yes (z > 3.5)' : 'no'} />
             </div>
           ) : (
             <div className="grid grid-cols-2 gap-2 sm:grid-cols-4 lg:grid-cols-8">
@@ -187,6 +261,16 @@ export default function TopologyMap({ frame }: Props) {
               <Detail label="Top process" value={bw.top_process?.name ?? '—'} />
               <Detail label="Connections" value={bw.top_process ? String(bw.top_process.connections) : '—'} />
               <Detail label="Platform" value={net.platform} />
+              <Detail label="SSID" value={frame.wifi?.ssid ?? '—'} />
+              <Detail
+                label="Signal"
+                value={frame.wifi?.rssi_dbm != null ? `${frame.wifi.rssi_estimated ? '≈' : ''}${frame.wifi.rssi_dbm} dBm${frame.wifi.signal_pct != null ? ` (${frame.wifi.signal_pct}%)` : ''}` : '—'}
+              />
+              <Detail label="Band · channel" value={frame.wifi?.band ? `${frame.wifi.band} · ${frame.wifi.channel ?? '?'}` : '—'} />
+              <Detail
+                label="PHY rate rx / tx"
+                value={frame.wifi?.rx_rate_mbps != null || frame.wifi?.tx_rate_mbps != null ? `${frame.wifi?.rx_rate_mbps ?? '—'} / ${frame.wifi?.tx_rate_mbps ?? '—'} Mb/s` : '—'}
+              />
             </div>
           )}
         </div>

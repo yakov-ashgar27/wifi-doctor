@@ -1,4 +1,4 @@
-import type { ChaosMode, ChaosState, IncidentPage } from '../types/telemetry';
+import type { ChaosMode, ChaosState, IncidentPage, StressTestStatus } from '../types/telemetry';
 
 export const API_BASE = (import.meta.env.VITE_API_BASE ?? '').replace(/\/$/, '');
 
@@ -18,5 +18,7 @@ export const api = {
   incidents: (page: number, pageSize: number, realOnly: boolean) =>
     request<IncidentPage>(`/api/incidents?page=${page}&page_size=${pageSize}&real_only=${realOnly}`),
   setChaos: (mode: ChaosMode) => request<ChaosState>(`/api/chaos/${mode}`, { method: 'POST' }),
+  startStressTest: () => request<StressTestStatus>('/api/stress-test/start', { method: 'POST' }),
+  stressTestStatus: () => request<StressTestStatus>('/api/stress-test/status'),
   exportUrl: (realOnly: boolean) => `${API_BASE}/api/incidents/export?real_only=${realOnly}`,
 };

@@ -29,6 +29,8 @@ async def set_chaos(mode: str, request: Request) -> ChaosState:
     if mode not in MODES:
         raise HTTPException(status_code=422, detail=f"Unknown chaos mode '{mode}'. Use one of: {', '.join(MODES)}")
     service = _service(request)
+    if mode != "none" and service.stress.running:
+        raise HTTPException(status_code=409, detail="A bufferbloat stress test is running; wait for it to finish.")
     service.simulator.set_mode(mode)
     await service.broadcast({"type": "chaos", "mode": mode, "since": service.simulator.since})
     return ChaosState(mode=mode, since=service.simulator.since, available=MODES)
@@ -43,6 +45,8 @@ async def status(request: Request) -> dict:
         "clients": len(service.clients),
         "chaos_mode": service.simulator.mode.value,
         "network": service.prober.network.to_dict(),
+        "wifi": service.monitor.wifi.to_dict() if service.monitor.wifi else None,
+        "stress_test": service.stress.status(),
         "latest": service.latest,
     }
 

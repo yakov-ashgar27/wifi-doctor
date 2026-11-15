@@ -45,7 +45,7 @@ export default function ChaosControls({ mode, disabled }: Props) {
           Faults are layered on top of real probes before analysis: watch the RCA engine find them.
         </p>
       </div>
-      <div className="grid grid-cols-1 gap-2 sm:grid-cols-2 lg:grid-cols-5">
+      <div className="grid grid-cols-1 gap-2 sm:grid-cols-2 lg:grid-cols-3 2xl:grid-cols-5">
         {OPTIONS.map(({ mode: m, label, hint, icon: Icon, active }) => {
           const isActive = m === mode;
           return (

@@ -42,7 +42,7 @@ def _env_list(name: str, default: list[str]) -> list[str]:
 class Settings:
     # ------------------------------------------------------------------ app
     app_name: str = "WiFi-Doctor"
-    version: str = "1.0.0"
+    version: str = "1.1.0"
     database_url: str = field(
         default_factory=lambda: _env_str(
             "DATABASE_URL", "sqlite+aiosqlite:///./data/wifi_doctor.db"
@@ -108,8 +108,47 @@ class Settings:
     incident_cooldown_s: float = field(default_factory=lambda: _env_float("INCIDENT_COOLDOWN_S", 30.0))
     incident_recovery_ticks: int = 3   # consecutive HEALTHY ticks to close an incident
 
+    # ------------------------------------------- adaptive baselines (z-score)
+    # Long rolling buffer of *good* RTT samples per hop (~10 min at 1.5 s).
+    baseline_window_size: int = field(default_factory=lambda: _env_int("BASELINE_WINDOW_SIZE", 400))
+    baseline_min_samples: int = field(default_factory=lambda: _env_int("BASELINE_MIN_SAMPLES", 60))
+    zscore_threshold: float = field(default_factory=lambda: _env_float("ZSCORE_THRESHOLD", 3.5))
+    # sigma = max(1.4826 * MAD, floor) so ultra-stable wired links do not explode the z-score
+    baseline_sigma_floor_ms: float = field(default_factory=lambda: _env_float("BASELINE_SIGMA_FLOOR_MS", 1.0))
+    # An anomaly also needs the RTT to clear a minimum noise floor per hop
+    anomaly_floor_gateway_ms: float = field(default_factory=lambda: _env_float("ANOMALY_FLOOR_GATEWAY_MS", 15.0))
+    anomaly_floor_wan_ms: float = field(default_factory=lambda: _env_float("ANOMALY_FLOOR_WAN_MS", 35.0))
+    anomaly_floor_dns_ms: float = field(default_factory=lambda: _env_float("ANOMALY_FLOOR_DNS_MS", 45.0))
+    # While a hop is anomalous only every Nth sample enters the baseline, so a
+    # sustained fault cannot quickly redefine "normal" (but a permanent change
+    # of network still converges eventually).
+    baseline_anomaly_admit_every: int = 10
+
     # ------------------------------------------------------ system monitor
     top_process_refresh_s: float = 3.0
+
+    # ------------------------------------------------ physical Wi-Fi layer
+    wifi_refresh_s: float = field(default_factory=lambda: _env_float("WIFI_REFRESH_S", 4.0))
+    wifi_weak_rssi_dbm: float = field(default_factory=lambda: _env_float("WIFI_WEAK_RSSI_DBM", -72.0))
+
+    # ---------------------------------------------- bufferbloat stress test
+    stress_duration_s: float = field(default_factory=lambda: _env_float("STRESS_DURATION_S", 8.0))
+    stress_timeout_s: float = field(default_factory=lambda: _env_float("STRESS_TIMEOUT_S", 10.0))
+    stress_download_workers: int = 3
+    stress_upload_workers: int = 1
+    stress_download_urls: list[str] = field(
+        default_factory=lambda: _env_list(
+            "STRESS_DOWNLOAD_URLS",
+            [
+                "https://speed.cloudflare.com/__down?bytes=25000000",
+                "https://proof.ovh.net/files/10Mb.dat",
+                "http://speedtest.tele2.net/10MB.zip",
+            ],
+        )
+    )
+    stress_upload_urls: list[str] = field(
+        default_factory=lambda: _env_list("STRESS_UPLOAD_URLS", ["https://speed.cloudflare.com/__up"])
+    )
 
 
 settings = Settings()

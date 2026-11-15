@@ -14,7 +14,7 @@ from fastapi.middleware.cors import CORSMiddleware
 
 from .config import settings
 from .database import dispose_db, init_db
-from .routers import control, incidents
+from .routers import control, incidents, stress
 from .service import TelemetryService
 
 logging.basicConfig(
@@ -61,6 +61,7 @@ app.add_middleware(
 
 app.include_router(incidents.router)
 app.include_router(control.router)
+app.include_router(stress.router)
 
 
 @app.websocket("/ws")
