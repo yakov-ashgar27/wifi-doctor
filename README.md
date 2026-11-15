@@ -6,6 +6,8 @@
 
 It finds the layer where your network is failing and tells you how to fix it.
 
+[![CI](https://github.com/yakov-ashgar27/wifi-doctor/actions/workflows/ci.yml/badge.svg)](https://github.com/yakov-ashgar27/wifi-doctor/actions/workflows/ci.yml)
+![Tests](https://img.shields.io/badge/tests-65%20passing-brightgreen)
 ![Python](https://img.shields.io/badge/Python-3.13-3776AB?logo=python&logoColor=white)
 ![FastAPI](https://img.shields.io/badge/FastAPI-WebSockets-009688?logo=fastapi&logoColor=white)
 ![React](https://img.shields.io/badge/React-18-61DAFB?logo=react&logoColor=black)
@@ -19,6 +21,12 @@ It finds the layer where your network is failing and tells you how to fix it.
 <img src="docs/dashboard.png" alt="WiFi-Doctor dashboard diagnosing bufferbloat with 95% confidence" width="900"/>
 
 <sub><i>Live dashboard on a home Wi-Fi network: the Bufferbloat simulation saturates the link, latency inflates on every hop, and the RCA engine names local bandwidth saturation as the root cause with 95% confidence.</i></sub>
+
+<br/><br/>
+
+<img src="docs/features-v1.1.png" alt="Wi-Fi physical evidence in the fix, a real bufferbloat grade, and per-hop learned baselines" width="760"/>
+
+<sub><i>v1.1 on the same laptop. Left: the recommended fix cites the measured radio (−80 dBm, 2.4 GHz channel 6). Right: a <b>real</b> 8-second load test grades the connection <b>C</b> (Internet latency 7 → 112 ms under load). Bottom: each hop shows its learned baseline and robust z-score.</i></sub>
 
 </div>
 
@@ -51,6 +59,33 @@ Packet sniffers such as Wireshark show you everything and conclude nothing. WiFi
 - **Chaos Engineering mode** that injects realistic faults, so you can watch a full diagnosis even on a healthy network.
 - **Incident log in SQLite** with a 30 s anti-spam cooldown, worst-case metric tracking and a one-click **ISP Evidence Report (CSV)**.
 - **NOC-style React dashboard** with a live hop topology, synchronised charts, and a resilient WebSocket client (backoff, jitter, watchdog).
+
+---
+
+## Validated on a real network
+
+The test suite is not the only evidence. WiFi-Doctor was installed on a Windows 11 laptop (Hebrew locale, 5 GHz Wi-Fi, ISP router) and every feature was run against the live network. These are the measured results, not synthetic ones:
+
+| Check | Result on the real network |
+|---|---|
+| Physical Wi-Fi telemetry (`netsh`, Hebrew Windows) | SSID, **−72 to −79 dBm**, 5 GHz ch 40, 802.11ac, 97.5 Mbps PHY rate parsed correctly |
+| Adaptive baselines | Learned gateway 3–4 ms, WAN 8–9 ms, DNS 9–11 ms; z-scores near 0 when healthy |
+| Bufferbloat test (3 independent runs) | Grade **C** every time: +71 / +105 / +107 ms under 51–83 Mbps of load |
+| All four chaos modes, switched back-to-back | 4/4 correct root cause (LOCAL_WIFI 99 %, ISP_WAN, DNS_SERVER 94 %, BUFFERBLOAT) |
+| Concurrency guards | Second test → `409`, test during chaos → `409`, chaos during test → `409` |
+| Incident log / ISP CSV | Self-inflicted test load creates **no** incident; "real only" export excludes all simulated rows |
+
+The diagnosis for that laptop was consistent across every tool: a weak signal (−77 dBm) and a router without queue management. The Wi-Fi badge, the gateway latency under load and the grade all pointed to the same fix.
+
+### Bugs that only real-world testing found
+
+Every one of these passed CI and was caught only by running the app on real hardware. Each now has a regression test.
+
+1. **One lost ping raised a Wi-Fi alarm.** On a weak link, 1 dropped probe in a 20-probe window is 5 %, which is over the 3 % threshold. Loss triggers now require at least 2 lost probes.
+2. **Back-to-back chaos modes were misdiagnosed** (ISP loss reported as Wi-Fi), because the previous scenario's samples were still in the rolling window. Windows now reset on every mode change.
+3. **The bufferbloat test logged an incident against itself,** and its loaded RTTs leaked into the "normal" baseline. Self-induced load is now excluded from incidents and baselines, and the windows are cleared when a test ends.
+4. **Closing the console left the backend running,** so the next launch silently served the old version. The backend is now attached to the console window.
+5. **The launcher stopped another app's processes.** It found Docker Desktop on port 8000 and killed it. The launcher now stops only its own Python/Node processes and moves to free ports when another program holds 8000 or 5173.
 
 ---
 
@@ -181,14 +216,23 @@ docker compose up --build
 sudo ./scripts/run_local.sh       # optional: enables scapy raw-socket ICMP
 ```
 
-**Windows (PowerShell)**
+**Windows: one click**
+
+Double-click **`scripts\run_local.bat`**. The launcher:
+
+- installs Python and Node.js with `winget` if they are missing
+- creates the virtualenv and installs dependencies
+- picks free ports if another app (such as a Docker project) holds 8000 or 5173
+- opens the dashboard
+
+Keep its window open; closing it stops WiFi-Doctor.
 
 ```powershell
+# equivalent from a PowerShell prompt
 powershell -ExecutionPolicy Bypass -File .\scripts\run_local.ps1
-# or double-click scripts\run_local.bat
 ```
 
-> On Windows, scapy needs [Npcap](https://npcap.com/) and an Administrator shell. Without them, WiFi-Doctor automatically uses `ping.exe` and keeps measuring real latency.
+> On Windows, scapy needs [Npcap](https://npcap.com/) and an Administrator shell. Without them, WiFi-Doctor automatically uses `ping.exe` and keeps measuring real latency. On Windows 11 24H2+, turn on **Location services** so `netsh` can report Wi-Fi signal details.
 
 **Manual setup**
 

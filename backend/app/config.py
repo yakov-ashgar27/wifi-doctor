@@ -42,7 +42,7 @@ def _env_list(name: str, default: list[str]) -> list[str]:
 class Settings:
     # ------------------------------------------------------------------ app
     app_name: str = "WiFi-Doctor"
-    version: str = "1.1.0"
+    version: str = "1.1.1"
     database_url: str = field(
         default_factory=lambda: _env_str(
             "DATABASE_URL", "sqlite+aiosqlite:///./data/wifi_doctor.db"

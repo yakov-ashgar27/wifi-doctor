@@ -510,9 +510,14 @@ class Analyzer:
                 f"{gw_loss:.0f}% loss and {self._fmt(gw.jitter_ms)} jitter, where a healthy LAN is under "
                 f"{s.gateway_healthy_ms:.0f} ms. Every packet to the Internet must cross this hop first. {load_note}"
                 f"{self._baseline_note(gw)}{phys_text}",
-                f"{phys_action}Move closer to the router or remove obstructions, switch to the 5 GHz / 6 GHz band, change to a "
-                "less congested Wi-Fi channel, and reboot the router. If it persists, test with an Ethernet cable "
-                "to confirm the wireless link is the culprit.",
+                (
+                    f"{phys_action}Then change to a less congested Wi-Fi channel and reboot the router. If it persists, "
+                    "test with an Ethernet cable to confirm the wireless link is the culprit."
+                    if phys_action
+                    else "Move closer to the router or remove obstructions, switch to the 5 GHz / 6 GHz band, change to a "
+                    "less congested Wi-Fi channel, and reboot the router. If it persists, test with an Ethernet cable "
+                    "to confirm the wireless link is the culprit."
+                ),
             )
 
         # ---- 3. ISP / WAN
@@ -598,7 +603,7 @@ class Analyzer:
         if wifi.channel is not None:
             where += f" channel {wifi.channel}"
         label = "Weak Wi-Fi signal" if weak else "Wi-Fi signal"
-        text = f" Physical layer: {label.lower()} ({signal}){where}."
+        text = f" Physical layer: {'weak Wi-Fi signal' if weak else 'Wi-Fi signal'} ({signal}){where}."
         if weak and on_24:
             action = f"{label} ({signal}){where}: switch to 5 GHz or move closer to the router. "
         elif weak:
