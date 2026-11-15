@@ -194,8 +194,10 @@ cd wifi-doctor
 docker compose up --build
 ```
 
-- Dashboard: **http://localhost:3088**
-- API docs (Swagger): **http://localhost:8088/docs**
+After the containers are up, open:
+
+- Dashboard: `http://localhost:3088`
+- API docs (Swagger): `http://localhost:8088/docs`
 
 The Docker setup uses host ports 3088 and 8088, which are uncommon, so it does not collide with other local projects that already use 3000 or 8000.
 
