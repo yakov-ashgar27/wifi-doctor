@@ -30,6 +30,8 @@ It finds the layer where your network is failing and tells you how to fix it.
 
 </div>
 
+📐 **System design:** [DFD (levels 0–1) and ERD](docs/DIAGRAMS.md), drawn from the code.
+
 ---
 
 ## Why WiFi-Doctor?
